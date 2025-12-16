@@ -1,2 +1,2 @@
 下载
-./pve_optimizer.sh
+./pve.sh
