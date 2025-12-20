@@ -267,13 +267,15 @@ rollback_all() {
 
 main_menu() {
     while true; do
-        res=$($DIALOG --title "PVE 终极优化脚本 v3.0" --menu "PVE 版本: $CURRENT_PVE_VERSION" 20 65 7 \
+        res=$($DIALOG --title "PVE 终极优化脚本 v3.0" --menu "PVE 版本: $CURRENT_PVE_VERSION" 20 65 9 \
             1 "CPU 性能、调频与虚拟机优化" \
             2 "去除网页‘无有效订阅’弹窗" \
             3 "安装全套监控工具 (温度/看板)" \
             4 "电源工作模式一键预设 (节能/性能)" \
             5 "查看当前系统运行状态" \
             6 "一键回滚脚本所做的修改" \
+            7 "内存清理" \
+            8 "磁盘清理" \
             0 "退出脚本" 3>&1 1>&2 2>&3)
         
         [[ -z "$res" || "$res" == "0" ]] && break
@@ -284,8 +286,38 @@ main_menu() {
             4) power_optimization_menu ;;
             5) show_system_status ;;
             6) rollback_all ;;
+            7) clear_memory ;;
+            8) clear_disk ;;
         esac
     done
+}
+
+# --- 7. 内存清理功能 ---
+clear_memory() {
+    show_msg "开始清理内存缓存..." "info"
+    sync
+    echo 3 > /proc/sys/vm/drop_caches
+    show_msg "内存缓存清理完成。" "success"
+}
+
+# --- 8. 磁盘清理功能 ---
+clear_disk() {
+    show_msg "开始清理磁盘空间..." "info"
+
+    # 清理 apt 缓存
+    apt clean
+    show_msg "APT 缓存清理完成。" "success"
+
+    # 清理旧日志文件
+    find /var/log -type f -name "*.log" -delete
+    find /var/log -type f -name "*.gz" -delete
+    show_msg "旧日志文件清理完成。" "success"
+
+    # 清理临时文件
+    rm -rf /tmp/*
+    show_msg "临时文件清理完成。" "success"
+
+    show_msg "磁盘清理完成。" "success"
 }
 
 main() {
