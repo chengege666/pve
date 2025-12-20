@@ -246,24 +246,7 @@ show_system_status() {
     $DIALOG --title "实时状态" --msgbox "$status" 20 70
 }
 
-# --- 7. 清理内存 ---
-clean_memory() {
-    sync
-    echo 1 > /proc/sys/vm/drop_caches
-    echo 2 > /proc/sys/vm/drop_caches
-    echo 3 > /proc/sys/vm/drop_caches
-    show_msg "内存清理完成" "success"
-}
-
-# --- 8. 清理磁盘 ---
-clean_disk() {
-    apt-get clean
-    apt-get autoremove -y
-    journalctl --vacuum-size=50M
-    show_msg "磁盘清理完成" "success"
-}
-
-# --- 9. 找回一键回滚功能 ---
+# --- 6. 找回一键回滚功能 ---
 rollback_all() {
     if [[ ! -d "$BACKUP_DIR" ]]; then
         $DIALOG --title "错误" --msgbox "未找到本次执行的备份目录。" 10 40; return
@@ -290,9 +273,7 @@ main_menu() {
             3 "安装全套监控工具 (温度/看板)" \
             4 "电源工作模式一键预设 (节能/性能)" \
             5 "查看当前系统运行状态" \
-            6 "清理系统内存 (释放缓存)" \
-            7 "清理系统磁盘 (apt缓存/日志)" \
-            8 "一键回滚脚本所做的修改" \
+            6 "一键回滚脚本所做的修改" \
             0 "退出脚本" 3>&1 1>&2 2>&3)
         
         [[ -z "$res" || "$res" == "0" ]] && break
@@ -302,9 +283,7 @@ main_menu() {
             3) install_monitoring_tools ;;
             4) power_optimization_menu ;;
             5) show_system_status ;;
-            6) clean_memory ;;
-            7) clean_disk ;;
-            8) rollback_all ;;
+            6) rollback_all ;;
         esac
     done
 }
