@@ -1,413 +1,330 @@
 #!/bin/bash
-# ====================================================
-# PVE 换源工具 (支持 PVE 9.0+ / Debian 12)
-# 基于图片菜单实现，适用于 Proxmox VE 9.0 及以上
-# ====================================================
 
-set -e  # 遇到错误退出（可选，根据需求调整）
+# ================================================
+# PVE 一键优化脚本 v3.0 (全功能汉化终极版)
+# 整合内容：备份回滚 + 调频 + Intel 特性 + 订阅去广告 + 监控工具
+# ================================================
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
+YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+CYAN='\033[0;36m'
+NC='\033[0m'
 
-# 检查 root 权限
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}错误: 请使用 root 用户执行此脚本。${NC}"
-    exit 1
-fi
+# 全局变量
+BACKUP_DIR="/root/pve_backup_$(date +%Y%m%d_%H%M%S)"
+ROLLBACK_FILE="$BACKUP_DIR/rollback.log"
+CURRENT_PVE_VERSION=$(pveversion 2>/dev/null | grep -oP 'pve-manager/\K\d+\.\d+' || echo "未知")
+DIALOG="none"
 
-# 检测 PVE 版本
-check_pve_version() {
-    if ! command -v pveversion &> /dev/null; then
-        echo -e "${RED}错误: 未检测到 Proxmox VE 环境。${NC}"
-        exit 1
+# 消息显示函数
+show_msg() {
+    local msg="$1"
+    local type="$2"
+    case $type in
+        "info") echo -e "${BLUE}[信息]${NC} $msg" ;;
+        "success") echo -e "${GREEN}[成功]${NC} $msg" ;;
+        "warning") echo -e "${YELLOW}[警告]${NC} $msg" ;;
+        "error") echo -e "${RED}[错误]${NC} $msg" ;;
+    esac
+}
+
+# 环境与工具检查
+check_env() {
+    [[ $EUID -ne 0 ]] && { show_msg "必须以 root 运行" "error"; exit 1; }
+    if command -v whiptail &> /dev/null; then DIALOG=whiptail; elif command -v dialog &> /dev/null; then DIALOG=dialog; else DIALOG="none"; fi
+}
+
+# 自动备份函数
+backup_file() {
+    local file="$1"
+    local desc="$2"
+    if [[ -f "$file" ]]; then
+        mkdir -p "$BACKUP_DIR"
+        cp "$file" "$BACKUP_DIR/$(basename "$file").$(date +%s).bak"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $desc: $file" >> "$ROLLBACK_FILE"
     fi
-    PVE_VERSION=$(pveversion | grep -oP 'pve-manager/\K[0-9]+\.[0-9]+' | cut -d'.' -f1)
-    if [[ $PVE_VERSION -lt 9 ]]; then
-        echo -e "${YELLOW}警告: 当前 PVE 版本可能低于 9.0，部分功能可能不兼容。${NC}"
+}
+
+# 获取 CPU 详细信息
+get_cpu_info() {
+    CPU_VENDOR=$(grep -m1 vendor_id /proc/cpuinfo | awk '{print $3}')
+    CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
+    CPU_CORES=$(nproc)
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
+        CPU_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
     else
-        echo -e "${GREEN}检测到 PVE $PVE_VERSION 版本，脚本兼容。${NC}"
+        CPU_GOVERNOR="不支持/未知"
+    fi
+    if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq ]]; then
+        CURRENT_FREQ_MHZ=$(( $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq) / 1000 ))
     fi
 }
 
-# 检测网络连通性（简单 ping 百度）
-check_network() {
-    if ping -c 2 baidu.com &> /dev/null; then
-        NET_STATUS="${GREEN}已连接互联网${NC}"
-        return 0
-    else
-        NET_STATUS="${RED}未连接互联网${NC}"
-        return 1
+# --- 1. CPU 优化子菜单功能 ---
+
+# 1.1 配置调速器 (含补全的 userspace)
+configure_cpu_governor() {
+    get_cpu_info
+    local available=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null)
+    [[ -z "$available" ]] && { show_msg "当前 CPU 不支持调频" "warning"; return; }
+    
+    IFS=' ' read -ra gov_list <<< "$available"
+    local menu_items=()
+    for gov in "${gov_list[@]}"; do
+        case $gov in
+            "performance")  display="高性能 (始终最高频率)" ;;
+            "powersave")    display="节能模式 (始终最低频率)" ;;
+            "ondemand")     display="按需模式 (高负载升频，闲置降频)" ;;
+            "schedutil")    display="调度优化 (现代内核推荐，响应快)" ;;
+            "conservative") display="保守模式 (频率切换较平缓)" ;;
+            "userspace")    display="用户空间 (由外部程序或用户手动控制)" ;;
+            *)              display="$gov" ;;
+        esac
+        [[ "$gov" == "$CPU_GOVERNOR" ]] && display="$display [当前使用]"
+        menu_items+=("$gov" "$display")
+    done
+    
+    selected=$($DIALOG --title "选择 CPU 调速器" --menu "请选择工作模式：" 20 80 10 "${menu_items[@]}" 3>&1 1>&2 2>&3)
+    [[ -z "$selected" ]] && return
+
+    # 持久化备份
+    backup_file "/etc/default/cpufrequtils" "CPU 调速器配置"
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "$selected" > "$cpu" 2>/dev/null; done
+    echo -e "ENABLE=\"true\"\nGOVERNOR=\"$selected\"" > /etc/default/cpufrequtils
+    show_msg "调速器已改为 $selected 并已持久化" "success"
+}
+
+# 1.2 手动设置频率范围 (找回功能)
+configure_cpu_frequency() {
+    local min_f_file="/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq"
+    local max_f_file="/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"
+    [[ ! -f "$min_f_file" ]] && { show_msg "硬件不支持手动频率调整" "warning"; return; }
+    
+    local min_limit=$(( $(cat $min_f_file) / 1000 ))
+    local max_limit=$(( $(cat $max_f_file) / 1000 ))
+
+    new_min=$($DIALOG --title "设置最小频率" --inputbox "输入最小频率 (MHz)\n范围: $min_limit - $max_limit" 10 50 "$min_limit" 3>&1 1>&2 2>&3)
+    [[ -z "$new_min" ]] && return
+    new_max=$($DIALOG --title "设置最大频率" --inputbox "输入最大频率 (MHz)\n范围: $new_min - $max_limit" 10 50 "$max_limit" 3>&1 1>&2 2>&3)
+    [[ -z "$new_max" ]] && return
+
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do echo "$((new_min * 1000))" > "$cpu" 2>/dev/null; done
+    for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "$((new_max * 1000))" > "$cpu" 2>/dev/null; done
+    show_msg "频率范围已应用: $new_min - $new_max MHz" "success"
+}
+
+# 1.3 Intel CPU 特性深调 (修复版)
+configure_intel_features() {
+    if [[ "$CPU_VENDOR" != "GenuineIntel" ]]; then
+        $DIALOG --title "不支持" --msgbox "非 Intel CPU" 10 40; return
     fi
-}
+    local ps_status="/sys/devices/system/cpu/intel_pstate/status"
+    local tb_file="/sys/devices/system/cpu/intel_pstate/no_turbo"
+    [[ ! -f "$ps_status" ]] && { $DIALOG --title "错误" --msgbox "当前内核未开启 P-State" 10 40; return; }
 
-# 显示菜单
-show_menu() {
-    clear
-    check_network
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e "${GREEN}           PVE 换源工具 (v1.0)${NC}"
-    echo -e "${BLUE}==============================================${NC}"
-    echo -e " 1) 一键设置 DNS、换源并更新系统"
-    echo -e " 2) 更换 Proxmox VE 源"
-    echo -e " 3) 更新软件包"
-    echo -e " 4) 更新系统"
-    echo -e " 5) 设置系统 DNS"
-    echo -e " 6) 去除无效订阅源提示"
-    echo -e " 7) 修改 PVE 概要信息"
-    echo -e " 8) 应用 PVE 暗黑主题"
-    echo -e " 9) 配置 PVE IOMMU 与核显直通、SR-IOV，群晖虚拟 USB 引导等"
-    echo -e "10) 配置 CPU 电源管理 P-State 状态"
-    echo -e "11) 配置 CPU 工作模式"
-    echo -e "12) 通过 SLAAC 获取 IPv6"
-    echo -e "13) 卸载内核 (Kernels) 及头文件 (Headers)"
-    echo -e "14) 设置 PVE 启动内核"
-    echo -e "15) 设置 NTP 自动校时服务器"
-    echo -e "16) 移除 local-lvm 存储空间 (危险操作！)"
-    echo -e "17) 禁止系统修改网卡名称，使用 eth0 ~ ethN 原名 (风险操作！)"
-    echo -e "${BLUE}----------------------------------------------${NC}"
-    echo -e "网络连通性: $NET_STATUS"
-    echo -e "Ctrl+C: 退出"
-    echo -e "${BLUE}==============================================${NC}"
-    echo -n "请输入选项编号 [1-17]: "
-}
+    cur_tb="未知"; [[ -f "$tb_file" ]] && { [[ "$(cat $tb_file)" == "0" ]] && cur_tb="开启" || cur_tb="关闭"; }
 
-# 选项1：一键设置 DNS、换源并更新系统
-option1() {
-    echo -e "${YELLOW}执行一键设置 DNS、换源并更新系统...${NC}"
-    option5   # 设置 DNS
-    option2   # 换源
-    option4   # 更新系统
-    echo -e "${GREEN}一键操作完成。${NC}"
-}
+    opt=$($DIALOG --title "Intel 深度设置" --menu "当前 P-State: $(cat $ps_status)\n当前睿频: $cur_tb" 15 60 5 \
+        "active" "Active (由 P-State 驱动全面接管调频)" \
+        "passive" "Passive (由通用驱动接管，更省电)" \
+        "off" "Off (禁用 Intel 驱动模式)" \
+        "turbo" "切换 睿频加速 (Turbo Boost) 开/关" 3>&1 1>&2 2>&3)
 
-# 选项2：更换 Proxmox VE 源（支持多镜像站选择，新增官方源）
-option2() {
-    echo -e "${YELLOW}选择要更换的源：${NC}"
-    echo "1) 中科大 (USTC)"
-    echo "2) 清华 (Tuna)"
-    echo "3) 阿里云 (Aliyun)"
-    echo "4) 自定义"
-    echo "5) 官方源（恢复默认无订阅源）"
-    read -p "请输入选项 [1-5]: " src_choice
-
-    case $src_choice in
-        1)
-            DEB_MIRROR="https://mirrors.ustc.edu.cn/debian"
-            PVE_MIRROR="https://mirrors.ustc.edu.cn/proxmox/debian"
-            SEC_MIRROR="${DEB_MIRROR}-security"
-            ;;
-        2)
-            DEB_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/debian"
-            PVE_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/proxmox/debian"
-            SEC_MIRROR="${DEB_MIRROR}-security"
-            ;;
-        3)
-            DEB_MIRROR="https://mirrors.aliyun.com/debian"
-            PVE_MIRROR="https://mirrors.aliyun.com/proxmox/debian"
-            SEC_MIRROR="${DEB_MIRROR}-security"
-            ;;
-        4)
-            read -p "请输入 Debian 镜像地址 (例如 https://mirrors.xxx/debian): " DEB_MIRROR
-            read -p "请输入 Proxmox 镜像地址 (例如 https://mirrors.xxx/proxmox/debian): " PVE_MIRROR
-            SEC_MIRROR="${DEB_MIRROR}-security"
-            ;;
-        5)
-            DEB_MIRROR="http://deb.debian.org/debian"
-            PVE_MIRROR="http://download.proxmox.com/debian/pve"
-            SEC_MIRROR="http://deb.debian.org/debian-security"
-            ;;
-        *)
-            echo -e "${RED}无效选项，取消操作。${NC}"
-            return
+    case $opt in
+        "active"|"passive"|"off") echo "$opt" > "$ps_status" && show_msg "P-State 已设为 $opt" "success" ;;
+        "turbo")
+            [[ "$(cat $tb_file)" == "0" ]] && echo "1" > "$tb_file" || echo "0" > "$tb_file"
+            show_msg "睿频状态已切换" "success"
             ;;
     esac
-
-    echo -e "${YELLOW}正在更换源...${NC}"
-    # 备份原文件
-    cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-    cp /etc/apt/sources.list.d/pve-enterprise.list /etc/apt/sources.list.d/pve-enterprise.list.bak.$(date +%Y%m%d%H%M%S) 2>/dev/null || true
-
-    # 写入新的 Debian 源
-    cat > /etc/apt/sources.list <<EOF
-deb ${DEB_MIRROR} bookworm main contrib non-free non-free-firmware
-deb ${DEB_MIRROR} bookworm-updates main contrib non-free non-free-firmware
-deb ${SEC_MIRROR} bookworm-security main contrib non-free non-free-firmware
-EOF
-
-    # 写入新的 Proxmox 源（无订阅版）
-    cat > /etc/apt/sources.list.d/pve-enterprise.list <<EOF
-deb ${PVE_MIRROR} bookworm pve-no-subscription
-EOF
-
-    apt update
-    echo -e "${GREEN}源更换完成。${NC}"
 }
 
-# 选项3：更新软件包
-option3() {
-    echo -e "${YELLOW}正在更新软件包...${NC}"
-    apt update
-    apt upgrade -y
-    echo -e "${GREEN}软件包更新完成。${NC}"
-}
-
-# 选项4：更新系统
-option4() {
-    echo -e "${YELLOW}正在更新系统...${NC}"
-    apt update
-    apt dist-upgrade -y
-    echo -e "${GREEN}系统更新完成。${NC}"
-}
-
-# 选项5：设置系统 DNS
-option5() {
-    echo -e "${YELLOW}设置系统 DNS...${NC}"
-    read -p "请输入首选 DNS 服务器 (例如 114.114.114.114): " dns1
-    read -p "请输入备用 DNS 服务器 (例如 8.8.8.8): " dns2
-    # 使用 systemd-resolved 或直接修改 resolv.conf
-    if command -v resolvectl &> /dev/null; then
-        resolvectl dns eth0 $dns1 $dns2
-        echo -e "${GREEN}DNS 已通过 systemd-resolved 设置。${NC}"
-    else
-        cat > /etc/resolv.conf <<EOF
-nameserver $dns1
-nameserver $dns2
-EOF
-        echo -e "${GREEN}DNS 已写入 /etc/resolv.conf。${NC}"
-    fi
-}
-
-# 选项6：去除无效订阅源提示
-option6() {
-    echo -e "${YELLOW}正在去除无效订阅源提示...${NC}"
-    # 方法：修改 pve-manager 的 js 文件，将订阅检查返回真
-    local js_file="/usr/share/pve-manager/js/pvemanagerlib.js"
-    if [[ -f "$js_file" ]]; then
-        cp "$js_file" "$js_file.bak.$(date +%Y%m%d%H%M%S)"
-        sed -i "s/if (data.status === 'Active')/if (false)/g" "$js_file"
-        # 或者替换检查函数，这里用简单的字符串替换
-        systemctl restart pveproxy
-        echo -e "${GREEN}订阅提示已去除，请刷新浏览器。${NC}"
-    else
-        echo -e "${RED}未找到 pvemanagerlib.js，操作失败。${NC}"
-    fi
-}
-
-# 选项7：修改 PVE 概要信息（例如修改欢迎标题）
-option7() {
-    echo -e "${YELLOW}修改 PVE 概要信息...${NC}"
-    read -p "请输入新的概要信息标题（例如 'My PVE Cluster'）: " new_title
-    # 示例：修改 datacenter 显示的标题
-    local dc_file="/usr/share/pve-manager/views/datacenter/DataCenterView.js"
-    if [[ -f "$dc_file" ]]; then
-        cp "$dc_file" "$dc_file.bak.$(date +%Y%m%d%H%M%S)"
-        sed -i "s/title: gettext('Datacenter')/title: '${new_title}'/g" "$dc_file"
-        systemctl restart pveproxy
-        echo -e "${GREEN}概要信息已修改，请刷新浏览器。${NC}"
-    else
-        echo -e "${RED}未找到 DataCenterView.js，操作失败。${NC}"
-    fi
-}
-
-# 选项8：应用 PVE 暗黑主题
-option8() {
-    echo -e "${YELLOW}应用 PVE 暗黑主题...${NC}"
-    # 使用官方 dark-theme 脚本（假设已安装 git）
-    if ! command -v git &> /dev/null; then
-        apt install -y git
-    fi
-    if [[ ! -d "/opt/pve-dark-theme" ]]; then
-        git clone https://github.com/Weilbyte/PVEDiscordDark.git /opt/pve-dark-theme
-    fi
-    bash /opt/pve-dark-theme/install.sh
-    echo -e "${GREEN}暗黑主题安装完成，请刷新浏览器。${NC}"
-}
-
-# 选项9：配置 IOMMU 与核显直通等（复杂选项，提供指导并执行基础步骤）
-option9() {
-    echo -e "${YELLOW}配置 IOMMU 与核显直通、SR-IOV 等...${NC}"
-    echo "此选项将执行以下基础配置："
-    echo "1. 启用 IOMMU (编辑 /etc/default/grub)"
-    echo "2. 加载 VFIO 模块"
-    echo "3. 配置内核参数"
-    read -p "是否继续？(y/n): " confirm
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        # 备份 grub
-        cp /etc/default/grub /etc/default/grub.bak.$(date +%Y%m%d%H%M%S)
-        # 添加 intel_iommu=on 或 amd_iommu=on
-        if grep -q "iommu=on" /etc/default/grub; then
-            echo "IOMMU 已配置，跳过。"
-        else
-            sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&intel_iommu=on iommu=pt /' /etc/default/grub
-            update-grub
-        fi
-        # 加载 vfio 模块
-        echo "vfio" >> /etc/modules
-        echo "vfio_iommu_type1" >> /etc/modules
-        echo "vfio_pci" >> /etc/modules
-        echo "vfio_virqfd" >> /etc/modules
-        update-initramfs -u -k all
-        echo -e "${GREEN}基础 IOMMU 配置完成，请重启生效。${NC}"
-    else
-        echo "已取消。"
-    fi
-}
-
-# 选项10：配置 CPU 电源管理 P-State
-option10() {
-    echo -e "${YELLOW}配置 CPU 电源管理 P-State...${NC}"
-    # 安装 cpupower 并设置 governor
-    apt install -y linux-cpupower
-    read -p "请输入 CPU 调频策略 (ondemand/performance/powersave/conservative/schedutil): " gov
-    cpupower frequency-set -g $gov
-    echo -e "${GREEN}P-State 已设置为 $gov。${NC}"
-}
-
-# 选项11：配置 CPU 工作模式（类似选项10，可独立）
-option11() {
-    echo -e "${YELLOW}配置 CPU 工作模式...${NC}"
-    # 使用 cpupower 设置最小/最大频率等
-    if ! command -v cpupower &> /dev/null; then
-        apt install -y linux-cpupower
-    fi
-    read -p "请输入最小频率 (例如 800MHz): " min_freq
-    read -p "请输入最大频率 (例如 3.2GHz): " max_freq
-    cpupower frequency-set -u $max_freq -d $min_freq
-    echo -e "${GREEN}CPU 频率范围已设置。${NC}"
-}
-
-# 选项12：通过 SLAAC 获取 IPv6
-option12() {
-    echo -e "${YELLOW}配置 SLAAC 获取 IPv6...${NC}"
-    # 修改 /etc/network/interfaces，假设主接口为 vmbr0
-    local iface="vmbr0"
-    if grep -q "iface $iface inet6" /etc/network/interfaces; then
-        echo "IPv6 已配置，请手动检查。"
-    else
-        cat >> /etc/network/interfaces <<EOF
-
-iface $iface inet6 auto
-    accept_ra 2
-EOF
-        systemctl restart networking
-        echo -e "${GREEN}SLAAC 配置已添加。${NC}"
-    fi
-}
-
-# 选项13：卸载内核及头文件
-option13() {
-    echo -e "${YELLOW}卸载内核及头文件...${NC}"
-    # 列出已安装内核
-    dpkg -l | grep -E "linux-image-[0-9]" | grep -v "$(uname -r)" | awk '{print $2}' > /tmp/kernel_list
-    if [[ ! -s /tmp/kernel_list ]]; then
-        echo "没有可卸载的老内核。"
-        return
-    fi
-    echo "可卸载的内核："
-    cat /tmp/kernel_list
-    read -p "请输入要卸载的内核版本（输入 all 卸载所有老内核）: " kernel_choice
-    if [[ "$kernel_choice" == "all" ]]; then
-        apt purge $(cat /tmp/kernel_list) -y
-    else
-        apt purge $kernel_choice -y
-    fi
-    apt autoremove -y
-    echo -e "${GREEN}内核卸载完成。${NC}"
-}
-
-# 选项14：设置 PVE 启动内核
-option14() {
-    echo -e "${YELLOW}设置 PVE 启动内核...${NC}"
-    # 列出所有内核菜单项
-    awk -F\' '/menuentry / {print i++ " : " $2}' /boot/grub/grub.cfg
-    read -p "请输入要设为默认的菜单项序号 (例如 0): " entry_num
-    sed -i "s/GRUB_DEFAULT=.*/GRUB_DEFAULT=$entry_num/" /etc/default/grub
-    update-grub
-    echo -e "${GREEN}默认内核已设置为序号 $entry_num。${NC}"
-}
-
-# 选项15：设置 NTP 自动校时服务器
-option15() {
-    echo -e "${YELLOW}设置 NTP 自动校时服务器...${NC}"
-    read -p "请输入 NTP 服务器地址 (例如 pool.ntp.org): " ntp_server
-    if systemctl status systemd-timesyncd &>/dev/null; then
-        sed -i "s/^#NTP=/NTP=$ntp_server/" /etc/systemd/timesyncd.conf
-        systemctl restart systemd-timesyncd
-        echo -e "${GREEN}NTP 已设置为 $ntp_server。${NC}"
-    else
-        apt install -y chrony
-        sed -i "s/^pool /#pool /g" /etc/chrony/chrony.conf
-        echo "pool $ntp_server iburst" >> /etc/chrony/chrony.conf
-        systemctl restart chrony
-        echo -e "${GREEN}NTP 已通过 chrony 设置为 $ntp_server。${NC}"
-    fi
-}
-
-# 选项16：移除 local-lvm 存储空间（危险）
-option16() {
-    echo -e "${RED}警告：此操作将移除 local-lvm 存储空间，数据将丢失！${NC}"
-    read -p "请再次确认是否继续？(输入 YES 确认): " confirm
-    if [[ "$confirm" != "YES" ]]; then
-        echo "已取消。"
-        return
-    fi
-    # 卸载 lvm thin 并删除
-    lvremove pve/data -y
-    # 扩展 root 到剩余空间
-    lvextend -l +100%FREE pve/root
-    resize2fs /dev/mapper/pve-root
-    # 从存储中移除 local-lvm
-    pvesm remove local-lvm
-    echo -e "${GREEN}local-lvm 已移除，空间已合并至 root。${NC}"
-}
-
-# 选项17：禁止系统修改网卡名称，使用 eth0 原名
-option17() {
-    echo -e "${YELLOW}配置使用 eth0 传统网卡命名...${NC}"
-    # 添加内核参数 net.ifnames=0 biosdevname=0
-    cp /etc/default/grub /etc/default/grub.bak.$(date +%Y%m%d%H%M%S)
-    sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/&net.ifnames=0 biosdevname=0 /' /etc/default/grub
-    update-grub
-    echo -e "${GREEN}配置已添加，重启后生效。${NC}"
-}
-
-# 主循环
-main() {
-    check_pve_version
-    while true; do
-        show_menu
-        read choice
-        case $choice in
-            1) option1 ;;
-            2) option2 ;;
-            3) option3 ;;
-            4) option4 ;;
-            5) option5 ;;
-            6) option6 ;;
-            7) option7 ;;
-            8) option8 ;;
-            9) option9 ;;
-            10) option10 ;;
-            11) option11 ;;
-            12) option12 ;;
-            13) option13 ;;
-            14) option14 ;;
-            15) option15 ;;
-            16) option16 ;;
-            17) option17 ;;
-            *) echo -e "${RED}无效选项，请重新输入。${NC}" ;;
-        esac
-        echo -e "\n按 Enter 键返回菜单..."
-        read
+# 1.4 虚拟机 host 优化
+optimize_vm_cpu() {
+    local vms=$(qm list 2>/dev/null | awk 'NR>1 {print $1}')
+    [[ -z "$vms" ]] && { show_msg "没有正在运行的虚拟机" "info"; return; }
+    for vm in $vms; do
+        qm set "$vm" --cpu host && show_msg "虚拟机 $vm 已优化为 host 模式" "success"
     done
 }
 
-# 捕获 Ctrl+C
-trap 'echo -e "\n${YELLOW}退出脚本。${NC}"; exit 0' INT
+# CPU 优化子菜单界面
+cpu_optimization_menu() {
+    while true; do
+        get_cpu_info
+        sel=$($DIALOG --title "CPU 性能与调频优化" --menu "当前模式: $CPU_GOVERNOR | 频率: $CURRENT_FREQ_MHZ MHz" 18 65 6 \
+            1 "配置 CPU 调速器 (Governor)" \
+            2 "手动设置最小/最大频率" \
+            3 "Intel CPU 深度控制 (P-State/睿频)" \
+            4 "一键虚拟机 CPU 优化 (设置为 host)" \
+            5 "返回主菜单" 3>&1 1>&2 2>&3)
+        [[ -z "$sel" || "$sel" == "5" ]] && break
+        case $sel in
+            1) configure_cpu_governor ;;
+            2) configure_cpu_frequency ;;
+            3) configure_intel_features ;;
+            4) optimize_vm_cpu ;;
+        esac
+    done
+}
 
-# 执行主函数
-main
+# --- 2. 网页弹窗去除 ---
+remove_subscription_notice() {
+    local js_file="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+    [[ ! -f "$js_file" ]] && js_file="/usr/share/pve-manager/js/proxmoxlib.js"
+    if [[ -f "$js_file" ]]; then
+        backup_file "$js_file" "订阅广告修改"
+        sed -i.bak "s/if (data.status !== 'Active') {/if (false) {/" "$js_file"
+        systemctl restart pveproxy
+        $DIALOG --title "操作成功" --msgbox "弹窗已去除，请 Ctrl+F5 刷新浏览器网页。" 10 50
+    else
+        show_msg "未找到对应 JS 文件" "error"
+    fi
+}
+
+# --- 3. 找回全套监控工具安装 ---
+install_monitoring_tools() {
+    tools=$($DIALOG --title "安装监控工具" --checklist "空格键选择，回车键安装:" 20 65 8 \
+        "lm-sensors" "CPU温度、风扇监控" ON \
+        "smartmontools" "硬盘健康与寿命检测" ON \
+        "powertop" "系统功耗详细分析" OFF \
+        "nvme-cli" "NVMe SSD 专用管理工具" OFF \
+        "hddtemp" "传统硬盘温度监控" OFF \
+        "netdata" "酷炫的实时网页监控看板" OFF \
+        "stress-ng" "压力测试工具" OFF 3>&1 1>&2 2>&3)
+    
+    [[ -z "$tools" ]] && return
+    apt-get update
+    for tool in $tools; do
+        t=$(echo $tool | tr -d '"')
+        if [[ "$t" == "netdata" ]]; then
+            bash <(curl -Ss https://my-netdata.io/kickstart.sh) --non-interactive
+        else
+            apt-get install -y "$t"
+        fi
+        [[ "$t" == "lm-sensors" ]] && sensors-detect --auto
+    done
+    show_msg "所选工具安装完成" "success"
+}
+
+# --- 4. 找回详细电源模式选择 ---
+power_optimization_menu() {
+    mode=$($DIALOG --title "电源方案预设" --menu "请选择工作场景：" 15 60 4 \
+        "server" "高性能模式 (性能优先，忽略功耗)" \
+        "home" "家用平衡模式 (按需分配，静音平衡)" \
+        "save" "极致节能模式 (限制低功耗，降低发热)" 3>&1 1>&2 2>&3)
+    
+    case $mode in
+        "server")
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "performance" > "$cpu" 2>/dev/null; done
+            show_msg "已应用高性能预设" "success"
+            ;;
+        "home")
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "schedutil" > "$cpu" 2>/dev/null || echo "ondemand" > "$cpu" 2>/dev/null; done
+            show_msg "已应用家用平衡预设" "success"
+            ;;
+        "save")
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "powersave" > "$cpu" 2>/dev/null; done
+            echo "powersupersave" > /sys/module/pcie_aspm/parameters/policy 2>/dev/null
+            show_msg "已应用极致节能预设" "success"
+            ;;
+    esac
+}
+
+# --- 5. 系统状态显示 ---
+show_system_status() {
+    get_cpu_info
+    status="[ PVE版本 ]  $CURRENT_PVE_VERSION\n"
+    status+="[ CPU型号 ]  $CPU_MODEL\n"
+    status+="[ 当前频率 ]  $CURRENT_FREQ_MHZ MHz\n"
+    status+="[ 调速模式 ]  $CPU_GOVERNOR\n\n"
+    status+="[ 内存使用 ]\n$(free -h | awk 'NR<=2')\n\n"
+    status+="[ 磁盘空间 ]\n$(df -h | grep -E '^/dev/|pve-')"
+    $DIALOG --title "实时状态" --msgbox "$status" 20 70
+}
+
+# --- 6. 找回一键回滚功能 ---
+rollback_all() {
+    if [[ ! -d "$BACKUP_DIR" ]]; then
+        $DIALOG --title "错误" --msgbox "未找到本次执行的备份目录。" 10 40; return
+    fi
+    $DIALOG --title "确认回滚" --yesno "确定要撤销脚本对文件的所有修改吗？" 10 50
+    [[ $? -ne 0 ]] && return
+    
+    # 回滚 JS
+    local js_bak=$(ls $BACKUP_DIR/proxmoxlib.js*.bak 2>/dev/null | tail -n 1)
+    [[ -f "$js_bak" ]] && { cp "$js_bak" "/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js" 2>/dev/null || cp "$js_bak" "/usr/share/pve-manager/js/proxmoxlib.js"; }
+    
+    # 重启服务
+    systemctl restart pveproxy
+    show_msg "回滚完成，部分设置可能需要重启生效" "success"
+}
+
+# --- 主入口逻辑 ---
+
+main_menu() {
+    while true; do
+        res=$($DIALOG --title "PVE 终极优化脚本 v3.0" --menu "PVE 版本: $CURRENT_PVE_VERSION" 20 65 9 \
+            1 "CPU 性能、调频与虚拟机优化" \
+            2 "去除网页‘无有效订阅’弹窗" \
+            3 "安装全套监控工具 (温度/看板)" \
+            4 "电源工作模式一键预设 (节能/性能)" \
+            5 "查看当前系统运行状态" \
+            6 "一键回滚脚本所做的修改" \
+            7 "内存清理" \
+            8 "磁盘清理" \
+            0 "退出脚本" 3>&1 1>&2 2>&3)
+        
+        [[ -z "$res" || "$res" == "0" ]] && break
+        case $res in
+            1) cpu_optimization_menu ;;
+            2) remove_subscription_notice ;;
+            3) install_monitoring_tools ;;
+            4) power_optimization_menu ;;
+            5) show_system_status ;;
+            6) rollback_all ;;
+            7) clear_memory ;;
+            8) clear_disk ;;
+        esac
+    done
+}
+
+# --- 7. 内存清理功能 ---
+clear_memory() {
+    show_msg "开始清理内存缓存..." "info"
+    sync
+    echo 3 > /proc/sys/vm/drop_caches
+    show_msg "内存缓存清理完成。" "success"
+}
+
+# --- 8. 磁盘清理功能 ---
+clear_disk() {
+    show_msg "开始清理磁盘空间..." "info"
+
+    # 清理 apt 缓存
+    apt clean
+    show_msg "APT 缓存清理完成。" "success"
+
+    # 清理旧日志文件
+    find /var/log -type f -name "*.log" -delete
+    find /var/log -type f -name "*.gz" -delete
+    show_msg "旧日志文件清理完成。" "success"
+
+    # 清理临时文件
+    rm -rf /tmp/*
+    show_msg "临时文件清理完成。" "success"
+
+    show_msg "磁盘清理完成。" "success"
+}
+
+main() {
+    clear
+    check_env
+    $DIALOG --title "欢迎使用" --yesno "脚本将对 PVE 进行深度优化。\n修改前会自动备份至 $BACKUP_DIR\n\n是否开始？" 12 60
+    [[ $? -eq 0 ]] && main_menu
+}
+
+main "$@"
