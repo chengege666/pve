@@ -40,8 +40,13 @@ wget -qO- https://raw.githubusercontent.com/chengege666/pve/main/pve.sh | bash
 2.  **赋予执行权限**:
     ```bash
     chmod +x pve.sh
-    ```
 
+### 修复命令
+    
+    ```bash
+    sed -i 's/\r$//' pve.sh
+     ```
+     
 3.  **运行脚本**:
     ```bash
     ./pve.sh
