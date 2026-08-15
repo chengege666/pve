@@ -387,6 +387,13 @@ change_apt_source() {
     [[ -f "$ent_list" ]] && backup_file "$ent_list" "PVE 企业源"
     [[ -f "$nosub_list" ]] && backup_file "$nosub_list" "PVE 无订阅源"
 
+    # 禁用 Debian trixie 新格式源文件，避免与 sources.list 重复
+    local new_format="/etc/apt/sources.list.d/debian.sources"
+    if [[ -f "$new_format" ]]; then
+        backup_file "$new_format" "Debian 新格式源"
+        mv "$new_format" "${new_format}.disabled"
+    fi
+
     # 生成新的 sources.list
     cat > "$src_list" <<EOF
 deb $base_url/debian $codename main contrib non-free non-free-firmware
