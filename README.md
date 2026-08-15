@@ -19,7 +19,6 @@
 
 ### 一键运行 (推荐)
 
-将 `<USER>/<REPO>` 替换为你的 GitHub 仓库地址，直接执行无需下载：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chengege666/pve/main/pve.sh | bash
