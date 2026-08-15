@@ -177,29 +177,46 @@ cpu_optimization_menu() {
 
 # --- 2. 网页弹窗去除 ---
 remove_subscription_notice() {
+    local found=0
+
+    # 第 1 步：修改 Perl API 订阅接口（最可靠，所有版本通用）
+    local perl_file="/usr/share/perl5/PVE/API2/Nodes.pm"
+    if [[ -f "$perl_file" ]]; then
+        found=1
+        backup_file "$perl_file" "订阅API修改"
+        # 将订阅状态强制改为 Active
+        perl -i -pe 's/(status\s*=>\s*)["'"'"']?(\w+)["'"'"']?/$1"Active"/g' "$perl_file"
+    fi
+
+    # 第 2 步：修改 JS 文件
     local js_files=(
         "/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+        "/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.min.js"
         "/usr/share/pve-manager/js/proxmoxlib.js"
         "/usr/share/pve-manager/js/pvemanagerlib.js"
-        "/usr/share/javascript/proxmox-widget-toolkit/widgets/datacenter.js"
     )
-    local found=0
 
     for js_file in "${js_files[@]}"; do
         [[ ! -f "$js_file" ]] && continue
         found=1
         backup_file "$js_file" "订阅广告修改"
-        # 兼容 PVE 6.x - 9.x 各种格式的弹窗判断
-        sed -i.bak \
-            -e "s/if (data.status !== 'Active')/if (false)/g" \
-            -e "s/if (data\.status !== 'Active')/if (false)/g" \
-            -e "s/if[[:space:]]*(data\.status[[:space:]]*!==[[:space:]]*'Active')/if (false)/g" \
-            -e "s/if (!data.status || data.status !== 'Active')/if (false)/g" \
-            "$js_file"
+
+        if [[ "$js_file" == *.min.js ]]; then
+            # minified 文件：用 perl 处理单行压缩代码
+            perl -i -pe 's/get\("subscriptionActive"\)===\s*""/false/g; s/!get\("subscriptionActive"\)/false/g; s/!get\("enterpriseRepo"\)/false/g' "$js_file"
+        else
+            # 未压缩 JS：用 sed 处理多行代码
+            sed -i.bak \
+                -e "s/if (get('subscriptionActive') === '' || get('enterpriseRepo') === '')/if (false)/g" \
+                -e "s/else if (!get('subscriptionActive') \\&\\& get('enterpriseRepo'))/else if (false)/g" \
+                -e "s/if (get('subscriptionActive') === '')/if (false)/g" \
+                -e "s/if (data.status !== 'Active')/if (false)/g" \
+                "$js_file"
+        fi
     done
 
     if [[ $found -eq 0 ]]; then
-        show_msg "未找到 JS 文件" "error"
+        show_msg "未找到任何相关文件" "error"
         return
     fi
 
