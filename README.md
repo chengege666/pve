@@ -41,9 +41,9 @@ wget -qO- https://raw.githubusercontent.com/chengege666/pve/main/pve.sh | bash
     ```bash
     chmod +x pve.sh
      ```
-### 修复命令
+    ### 修复命令
     
-    sed -i 's/\r$//' pve.sh
+     sed -i 's/\r$//' pve.sh
    
      
 3.  **运行脚本**:
