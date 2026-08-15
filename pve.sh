@@ -2409,8 +2409,26 @@ pveInfo_menu() {
 main() {
     clear
     check_env
-    $DIALOG --title "欢迎使用" --yesno "脚本将对 PVE 进行深度优化。\n修改前会自动备份至 $BACKUP_DIR\n\n是否开始？" 12 60
-    [[ $? -eq 0 ]] && main_menu
+    local start_opt=$($DIALOG --title "欢迎使用" --menu \
+        "脚本将对 PVE 进行深度优化。\n是否开始？\n\n（修改前会自动备份至 $BACKUP_DIR）" 14 60 3 \
+        1 "开始（修改前自动备份）" \
+        2 "开始（不备份，风险自担）" \
+        0 "退出" 3>&1 1>&2 2>&3)
+
+    case $start_opt in
+        1)
+            # 初始化备份目录
+            mkdir -p "$BACKUP_DIR"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 脚本启动，开始备份" > "$ROLLBACK_FILE"
+            main_menu
+            ;;
+        2)
+            main_menu
+            ;;
+        *)
+            exit 0
+            ;;
+    esac
 }
 
 main "$@"
