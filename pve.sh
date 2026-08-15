@@ -19,246 +19,6 @@ ROLLBACK_FILE="$BACKUP_DIR/rollback.log"
 CURRENT_PVE_VERSION=$(pveversion 2>/dev/null | grep -oP 'pve-manager/\K\d+\.\d+' || echo "未知")
 DIALOG="none"
 
-# ============ 文本模式 UI 工具函数 ============
-
-# 通用：打印分隔线
-ui_sep() {
-    local width=${1:-60}
-    local line=""
-    for ((i=0; i<width; i++)); do line="${line}="; done
-    echo -e "${CYAN}${line}${NC}"
-}
-
-# 文本菜单：与 whiptail --menu 行为一致
-# 参数: title prompt items... (item value 成对)
-# 返回选择的 item tag，取消返回空
-text_menu() {
-    local title="$1"; shift
-    local prompt="$1"; shift
-    # 跳过 whiptail 兼容的 height/witdh/menu_height 三个参数（如果是数字）
-    while [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -gt 0 ]]; do shift; done
-
-    local -a tags=()
-    local -a descs=()
-    while [[ $# -gt 0 ]]; do
-        tags+=("$1"); shift
-        descs+=("$1"); shift
-    done
-
-    echo ""
-    ui_sep
-    echo -e "${GREEN} ${title}${NC}"
-    ui_sep
-    echo -e "${BLUE} ${prompt}${NC}"
-    ui_sep
-    local i=1
-    for ((j=0; j<${#tags[@]}; j++)); do
-        printf "  ${YELLOW}%2d)${NC} %-20s %s\n" "$i" "${tags[$j]}" "${descs[$j]}"
-        i=$((i+1))
-    done
-    ui_sep
-    echo -e "  输入序号 (1-${#tags[@]}), 直接回车 = 返回/取消"
-    read -rp "  请选择: " choice
-    [[ -z "$choice" ]] && echo "" && return
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -le ${#tags[@]} ]]; then
-        echo "${tags[$((choice-1))]}"
-    else
-        echo ""
-    fi
-}
-
-# 文本输入框：与 whiptail --inputbox 行为一致
-# 参数: title prompt [height width default]
-# 返回输入值，取消返回空
-text_inputbox() {
-    local title="$1"; shift
-    local prompt="$1"; shift
-    # 跳过 height width
-    while [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -gt 0 ]]; do shift; done
-    local default="$1"
-
-    echo ""
-    ui_sep
-    echo -e "${GREEN} ${title}${NC}"
-    ui_sep
-    echo -e "${BLUE} ${prompt}${NC}"
-    ui_sep
-    local hint=""
-    [[ -n "$default" ]] && hint=" [默认: $default]"
-    read -rp "  请输入$hint: " input
-    if [[ -z "$input" ]]; then
-        echo "$default"
-    else
-        echo "$input"
-    fi
-}
-
-# 文本确认框：与 whiptail --yesno 行为一致
-# 返回 0=yes, 非0=no
-text_yesno() {
-    local title="$1"; shift
-    local prompt="$1"; shift
-    # 跳过 height width
-    while [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -gt 0 ]]; do shift; done
-
-    echo ""
-    ui_sep
-    echo -e "${GREEN} ${title}${NC}"
-    ui_sep
-    echo -e "${prompt}" | while IFS= read -r line; do
-        echo -e "  ${YELLOW}$line${NC}"
-    done
-    ui_sep
-    read -rp "  确认? (y/N): " ans
-    case "$ans" in
-        y|Y|yes|YES) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# 文本消息框：与 whiptail --msgbox 行为一致
-text_msgbox() {
-    local title="$1"; shift
-    local content="$1"; shift
-    # 跳过 height width
-    while [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -gt 0 ]]; do shift; done
-
-    echo ""
-    ui_sep
-    echo -e "${GREEN} ${title}${NC}"
-    ui_sep
-    echo -e "${content}" | while IFS= read -r line; do
-        echo -e "  $line"
-    done
-    ui_sep
-    read -n 1 -s -rp "  按任意键继续..."
-    echo ""
-}
-
-# 文本复选框：与 whiptail --checklist 行为一致
-# 参数: title prompt height width list_height items... (tag desc status 三元组)
-# 返回空格分隔的选中 tag
-text_checklist() {
-    local title="$1"; shift
-    local prompt="$1"; shift
-    # 跳过 height width list_height
-    while [[ "$1" =~ ^[0-9]+$ ]] && [[ $# -gt 0 ]]; do shift; done
-
-    local -a tags=()
-    local -a descs=()
-    local -a status=()
-    while [[ $# -gt 0 ]]; do
-        tags+=("$1"); shift
-        descs+=("$1"); shift
-        status+=("$1"); shift
-    done
-
-    echo ""
-    ui_sep
-    echo -e "${GREEN} ${title}${NC}"
-    ui_sep
-    echo -e "${BLUE} ${prompt}${NC}"
-    ui_sep
-    local i=1
-    for ((j=0; j<${#tags[@]}; j++)); do
-        local mark=" "
-        [[ "${status[$j]}" == "ON" || "${status[$j]}" == "on" ]] && mark="x"
-        printf "  ${YELLOW}%2d)${NC} [%s] %-18s %s\n" "$i" "$mark" "${tags[$j]}" "${descs[$j]}"
-        i=$((i+1))
-    done
-    ui_sep
-    echo "  说明: 输入要切换的序号(多个用空格分隔), 直接回车 = 确认"
-    echo "        初始 [x] 为默认勾选，输入对应序号可切换"
-
-    # 初始化选中状态
-    local -a selected=()
-    for ((j=0; j<${#tags[@]}; j++)); do
-        if [[ "${status[$j]}" == "ON" || "${status[$j]}" == "on" ]]; then
-            selected[$j]=1
-        else
-            selected[$j]=0
-        fi
-    done
-
-    while true; do
-        read -rp "  切换序号(回车确认): " nums
-        [[ -z "$nums" ]] && break
-        for n in $nums; do
-            if [[ "$n" =~ ^[0-9]+$ ]] && [[ $n -ge 1 ]] && [[ $n -le ${#tags[@]} ]]; then
-                local idx=$((n-1))
-                if [[ ${selected[$idx]} -eq 1 ]]; then
-                    selected[$idx]=0
-                else
-                    selected[$idx]=1
-                fi
-            fi
-        done
-        # 重新显示当前状态
-        echo ""
-        ui_sep
-        echo -e "${GREEN} ${title}${NC}"
-        ui_sep
-        i=1
-        for ((j=0; j<${#tags[@]}; j++)); do
-            local mark=" "
-            [[ ${selected[$j]} -eq 1 ]] && mark="x"
-            printf "  ${YELLOW}%2d)${NC} [%s] %-18s %s\n" "$i" "$mark" "${tags[$j]}" "${descs[$j]}"
-            i=$((i+1))
-        done
-        ui_sep
-    done
-
-    # 组装结果
-    local result=""
-    for ((j=0; j<${#tags[@]}; j++)); do
-        [[ ${selected[$j]} -eq 1 ]] && result="${result}\"${tags[$j]}\" "
-    done
-    echo "$result"
-}
-
-# ============ 兼容调用：自动选择 whiptail/dialog 或文本模式 ============
-# 所有脚本中原有的 $DIALOG --xxx 调用统一改为 ui_xxx 包装函数
-
-ui_menu() {
-    if [[ "$DIALOG" != "none" ]]; then
-        "$DIALOG" --title "$1" --menu "$2" "$3" "$4" "$5" "${@:6}" 3>&1 1>&2 2>&3
-    else
-        text_menu "$@"
-    fi
-}
-
-ui_inputbox() {
-    if [[ "$DIALOG" != "none" ]]; then
-        "$DIALOG" --title "$1" --inputbox "$2" "$3" "$4" "$5" 3>&1 1>&2 2>&3
-    else
-        text_inputbox "$@"
-    fi
-}
-
-ui_yesno() {
-    if [[ "$DIALOG" != "none" ]]; then
-        "$DIALOG" --title "$1" --yesno "$2" "$3" "$4"
-    else
-        text_yesno "$@"
-    fi
-}
-
-ui_msgbox() {
-    if [[ "$DIALOG" != "none" ]]; then
-        "$DIALOG" --title "$1" --msgbox "$2" "$3" "$4"
-    else
-        text_msgbox "$@"
-    fi
-}
-
-ui_checklist() {
-    if [[ "$DIALOG" != "none" ]]; then
-        "$DIALOG" --title "$1" --checklist "$2" "$3" "$4" "$5" "${@:6}" 3>&1 1>&2 2>&3
-    else
-        text_checklist "$@"
-    fi
-}
-
 # 消息显示函数
 show_msg() {
     local msg="$1"
@@ -271,23 +31,10 @@ show_msg() {
     esac
 }
 
-# 环境与工具检查（默认使用文本菜单，可用 --dialog 参数启用 whiptail/dialog）
+# 环境与工具检查
 check_env() {
     [[ $EUID -ne 0 ]] && { show_msg "必须以 root 运行" "error"; exit 1; }
-    # 支持命令行参数 --dialog / --whiptail 启用对话框模式
-    for arg in "$@"; do
-        case "$arg" in
-            --dialog|--whiptail|--tui)
-                if command -v whiptail &> /dev/null; then DIALOG=whiptail
-                elif command -v dialog &> /dev/null; then DIALOG=dialog
-                else show_msg "未检测到 whiptail/dialog，使用文本模式" "warning"; DIALOG="none"
-                fi
-                return
-                ;;
-        esac
-    done
-    # 默认使用文本菜单（FinalShell 兼容）
-    DIALOG="none"
+    if command -v whiptail &> /dev/null; then DIALOG=whiptail; elif command -v dialog &> /dev/null; then DIALOG=dialog; else DIALOG="none"; fi
 }
 
 # 自动备份函数
@@ -340,7 +87,7 @@ configure_cpu_governor() {
         menu_items+=("$gov" "$display")
     done
     
-    selected=$(ui_menu "选择 CPU 调速器" "请选择工作模式：" 20 80 10 "${menu_items[@]}")
+    selected=$($DIALOG --title "选择 CPU 调速器" --menu "请选择工作模式：" 20 80 10 "${menu_items[@]}" 3>&1 1>&2 2>&3)
     [[ -z "$selected" ]] && return
 
     # 持久化备份
@@ -359,9 +106,9 @@ configure_cpu_frequency() {
     local min_limit=$(( $(cat $min_f_file) / 1000 ))
     local max_limit=$(( $(cat $max_f_file) / 1000 ))
 
-    new_min=$(ui_inputbox "设置最小频率" "输入最小频率 (MHz)\n范围: $min_limit - $max_limit" 10 50 "$min_limit")
+    new_min=$($DIALOG --title "设置最小频率" --inputbox "输入最小频率 (MHz)\n范围: $min_limit - $max_limit" 10 50 "$min_limit" 3>&1 1>&2 2>&3)
     [[ -z "$new_min" ]] && return
-    new_max=$(ui_inputbox "设置最大频率" "输入最大频率 (MHz)\n范围: $new_min - $max_limit" 10 50 "$max_limit")
+    new_max=$($DIALOG --title "设置最大频率" --inputbox "输入最大频率 (MHz)\n范围: $new_min - $max_limit" 10 50 "$max_limit" 3>&1 1>&2 2>&3)
     [[ -z "$new_max" ]] && return
 
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do echo "$((new_min * 1000))" > "$cpu" 2>/dev/null; done
@@ -372,19 +119,19 @@ configure_cpu_frequency() {
 # 1.3 Intel CPU 特性深调 (修复版)
 configure_intel_features() {
     if [[ "$CPU_VENDOR" != "GenuineIntel" ]]; then
-        ui_msgbox "不支持" "非 Intel CPU" 10 40; return
+        $DIALOG --title "不支持" --msgbox "非 Intel CPU" 10 40; return
     fi
     local ps_status="/sys/devices/system/cpu/intel_pstate/status"
     local tb_file="/sys/devices/system/cpu/intel_pstate/no_turbo"
-    [[ ! -f "$ps_status" ]] && { ui_msgbox "错误" "当前内核未开启 P-State" 10 40; return; }
+    [[ ! -f "$ps_status" ]] && { $DIALOG --title "错误" --msgbox "当前内核未开启 P-State" 10 40; return; }
 
     cur_tb="未知"; [[ -f "$tb_file" ]] && { [[ "$(cat $tb_file)" == "0" ]] && cur_tb="开启" || cur_tb="关闭"; }
 
-    opt=$(ui_menu "Intel 深度设置" "当前 P-State: $(cat $ps_status)\n当前睿频: $cur_tb" 15 60 5 \
+    opt=$($DIALOG --title "Intel 深度设置" --menu "当前 P-State: $(cat $ps_status)\n当前睿频: $cur_tb" 15 60 5 \
         "active" "Active (由 P-State 驱动全面接管调频)" \
         "passive" "Passive (由通用驱动接管，更省电)" \
         "off" "Off (禁用 Intel 驱动模式)" \
-        "turbo" "切换 睿频加速 (Turbo Boost) 开/关")
+        "turbo" "切换 睿频加速 (Turbo Boost) 开/关" 3>&1 1>&2 2>&3)
 
     case $opt in
         "active"|"passive"|"off") echo "$opt" > "$ps_status" && show_msg "P-State 已设为 $opt" "success" ;;
@@ -408,12 +155,12 @@ optimize_vm_cpu() {
 cpu_optimization_menu() {
     while true; do
         get_cpu_info
-        sel=$(ui_menu "CPU 性能与调频优化" "当前模式: $CPU_GOVERNOR | 频率: $CURRENT_FREQ_MHZ MHz" 18 65 6 \
+        sel=$($DIALOG --title "CPU 性能与调频优化" --menu "当前模式: $CPU_GOVERNOR | 频率: $CURRENT_FREQ_MHZ MHz" 18 65 6 \
             1 "配置 CPU 调速器 (Governor)" \
             2 "手动设置最小/最大频率" \
             3 "Intel CPU 深度控制 (P-State/睿频)" \
             4 "一键虚拟机 CPU 优化 (设置为 host)" \
-            5 "返回主菜单")
+            5 "返回主菜单" 3>&1 1>&2 2>&3)
         [[ -z "$sel" || "$sel" == "5" ]] && break
         case $sel in
             1) configure_cpu_governor ;;
@@ -432,7 +179,7 @@ remove_subscription_notice() {
         backup_file "$js_file" "订阅广告修改"
         sed -i.bak "s/if (data.status !== 'Active') {/if (false) {/" "$js_file"
         systemctl restart pveproxy
-        ui_msgbox "操作成功" "弹窗已去除，请 Ctrl+F5 刷新浏览器网页。" 10 50
+        $DIALOG --title "操作成功" --msgbox "弹窗已去除，请 Ctrl+F5 刷新浏览器网页。" 10 50
     else
         show_msg "未找到对应 JS 文件" "error"
     fi
@@ -440,14 +187,14 @@ remove_subscription_notice() {
 
 # --- 3. 找回全套监控工具安装 ---
 install_monitoring_tools() {
-    tools=$(ui_checklist "安装监控工具" "空格键选择，回车键安装:" 20 65 8 \
+    tools=$($DIALOG --title "安装监控工具" --checklist "空格键选择，回车键安装:" 20 65 8 \
         "lm-sensors" "CPU温度、风扇监控" ON \
         "smartmontools" "硬盘健康与寿命检测" ON \
         "powertop" "系统功耗详细分析" OFF \
         "nvme-cli" "NVMe SSD 专用管理工具" OFF \
         "hddtemp" "传统硬盘温度监控" OFF \
         "netdata" "酷炫的实时网页监控看板" OFF \
-        "stress-ng" "压力测试工具" OFF)
+        "stress-ng" "压力测试工具" OFF 3>&1 1>&2 2>&3)
     
     [[ -z "$tools" ]] && return
     apt-get update
@@ -465,10 +212,10 @@ install_monitoring_tools() {
 
 # --- 4. 找回详细电源模式选择 ---
 power_optimization_menu() {
-    mode=$(ui_menu "电源方案预设" "请选择工作场景：" 15 60 4 \
+    mode=$($DIALOG --title "电源方案预设" --menu "请选择工作场景：" 15 60 4 \
         "server" "高性能模式 (性能优先，忽略功耗)" \
         "home" "家用平衡模式 (按需分配，静音平衡)" \
-        "save" "极致节能模式 (限制低功耗，降低发热)")
+        "save" "极致节能模式 (限制低功耗，降低发热)" 3>&1 1>&2 2>&3)
     
     case $mode in
         "server")
@@ -496,15 +243,15 @@ show_system_status() {
     status+="[ 调速模式 ]  $CPU_GOVERNOR\n\n"
     status+="[ 内存使用 ]\n$(free -h | awk 'NR<=2')\n\n"
     status+="[ 磁盘空间 ]\n$(df -h | grep -E '^/dev/|pve-')"
-    ui_msgbox "实时状态" "$status" 20 70
+    $DIALOG --title "实时状态" --msgbox "$status" 20 70
 }
 
 # --- 6. 找回一键回滚功能 ---
 rollback_all() {
     if [[ ! -d "$BACKUP_DIR" ]]; then
-        ui_msgbox "错误" "未找到本次执行的备份目录。" 10 40; return
+        $DIALOG --title "错误" --msgbox "未找到本次执行的备份目录。" 10 40; return
     fi
-    ui_yesno "确认回滚" "确定要撤销脚本对文件的所有修改吗？" 10 50
+    $DIALOG --title "确认回滚" --yesno "确定要撤销脚本对文件的所有修改吗？" 10 50
     [[ $? -ne 0 ]] && return
     
     # 回滚 JS
@@ -520,7 +267,7 @@ rollback_all() {
 
 main_menu() {
     while true; do
-        res=$(ui_menu "PVE 终极优化脚本 v3.0" "PVE 版本: $CURRENT_PVE_VERSION" 20 65 9 \
+        res=$($DIALOG --title "PVE 终极优化脚本 v3.0" --menu "PVE 版本: $CURRENT_PVE_VERSION" 22 65 11 \
             1 "CPU 性能、调频与虚拟机优化" \
             2 "去除网页‘无有效订阅’弹窗" \
             3 "安装全套监控工具 (温度/看板)" \
@@ -529,8 +276,10 @@ main_menu() {
             6 "一键回滚脚本所做的修改" \
             7 "内存清理" \
             8 "磁盘清理" \
-            0 "退出脚本")
-        
+            9 "系统更新 (升级已安装软件包)" \
+            10 "更换软件源 (国内镜像源)" \
+            0 "退出脚本" 3>&1 1>&2 2>&3)
+
         [[ -z "$res" || "$res" == "0" ]] && break
         case $res in
             1) cpu_optimization_menu ;;
@@ -541,6 +290,8 @@ main_menu() {
             6) rollback_all ;;
             7) clear_memory ;;
             8) clear_disk ;;
+            9) system_update ;;
+            10) change_apt_source ;;
         esac
     done
 }
@@ -573,10 +324,100 @@ clear_disk() {
     show_msg "磁盘清理完成。" "success"
 }
 
+# --- 9. 系统更新功能 ---
+system_update() {
+    show_msg "正在更新软件包列表..." "info"
+    if ! apt-get update; then
+        show_msg "软件包列表更新失败，请检查网络或软件源配置" "error"
+        return 1
+    fi
+
+    show_msg "开始升级已安装的软件包..." "info"
+    if apt-get upgrade -y; then
+        show_msg "系统软件包升级完成" "success"
+    else
+        show_msg "软件包升级过程中出现错误" "error"
+        return 1
+    fi
+
+    # 询问是否清理无用依赖
+    $DIALOG --title "清理依赖" --yesno "是否清理不再需要的依赖包？" 10 50
+    if [[ $? -eq 0 ]]; then
+        show_msg "正在清理无用依赖..." "info"
+        apt-get autoremove -y
+        show_msg "无用依赖清理完成" "success"
+    fi
+
+    show_msg "系统更新流程结束" "success"
+}
+
+# --- 10. 更换软件源功能 ---
+change_apt_source() {
+    # 检测 Debian 版本代号
+    local codename=""
+    [[ -f /etc/os-release ]] && codename=$(grep -E "^VERSION_CODENAME=" /etc/os-release | cut -d'=' -f2)
+    if [[ -z "$codename" ]]; then
+        $DIALOG --title "错误" --msgbox "无法识别 Debian 版本代号，操作取消" 10 50
+        return 1
+    fi
+
+    local src_list="/etc/apt/sources.list"
+    local ent_list="/etc/apt/sources.list.d/pve-enterprise.list"
+    local nosub_list="/etc/apt/sources.list.d/pve-no-subscription.list"
+
+    local sel=$($DIALOG --title "选择软件源 (当前 Debian: $codename)" --menu "请选择国内镜像源：" 18 60 5 \
+        "1" "中科大 USTC (推荐)" \
+        "2" "清华大学 TUNA" \
+        "3" "阿里云 Aliyun" \
+        "4" "华为云 Huaweicloud" \
+        "5" "恢复官方默认源" 3>&1 1>&2 2>&3)
+    [[ -z "$sel" ]] && return
+
+    local base_url=""
+    case $sel in
+        "1") base_url="https://mirrors.ustc.edu.cn" ;;
+        "2") base_url="https://mirrors.tuna.tsinghua.edu.cn" ;;
+        "3") base_url="https://mirrors.aliyun.com" ;;
+        "4") base_url="https://repo.huaweicloud.com" ;;
+        "5") base_url="https://deb.debian.org" ;;
+    esac
+
+    # 备份原 sources.list
+    backup_file "$src_list" "APT 软件源"
+    [[ -f "$ent_list" ]] && backup_file "$ent_list" "PVE 企业源"
+    [[ -f "$nosub_list" ]] && backup_file "$nosub_list" "PVE 无订阅源"
+
+    # 生成新的 sources.list
+    cat > "$src_list" <<EOF
+deb $base_url/debian $codename main contrib non-free non-free-firmware
+deb $base_url/debian $codename-updates main contrib non-free non-free-firmware
+deb $base_url/debian-security $codename-security main contrib non-free non-free-firmware
+EOF
+    [[ $? -ne 0 ]] && { show_msg "写入 sources.list 失败" "error"; return 1; }
+
+    # 处理 PVE 企业源：注释掉企业源，启用无订阅源
+    if [[ -f "$ent_list" ]]; then
+        sed -i 's/^\(deb .*\)/# \1/' "$ent_list"
+    fi
+
+    # 写入或覆盖 PVE 无订阅源
+    cat > "$nosub_list" <<EOF
+deb [trusted=yes] http://download.proxmox.com/debian/pve $codename pve-no-subscription
+EOF
+
+    # 刷新软件包列表
+    show_msg "软件源已更换，正在刷新软件包列表..." "info"
+    if apt-get update; then
+        show_msg "软件源更换并刷新成功" "success"
+    else
+        show_msg "软件源已更换，但刷新失败，请检查网络" "warning"
+    fi
+}
+
 main() {
     clear
-    check_env "$@"
-    ui_yesno "欢迎使用" "脚本将对 PVE 进行深度优化。\n修改前会自动备份至 $BACKUP_DIR\n\n是否开始？" 12 60
+    check_env
+    $DIALOG --title "欢迎使用" --yesno "脚本将对 PVE 进行深度优化。\n修改前会自动备份至 $BACKUP_DIR\n\n是否开始？" 12 60
     [[ $? -eq 0 ]] && main_menu
 }
 
