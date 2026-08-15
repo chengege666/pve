@@ -177,16 +177,34 @@ cpu_optimization_menu() {
 
 # --- 2. 网页弹窗去除 ---
 remove_subscription_notice() {
-    local js_file="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-    [[ ! -f "$js_file" ]] && js_file="/usr/share/pve-manager/js/proxmoxlib.js"
-    if [[ -f "$js_file" ]]; then
+    local js_files=(
+        "/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+        "/usr/share/pve-manager/js/proxmoxlib.js"
+        "/usr/share/pve-manager/js/pvemanagerlib.js"
+        "/usr/share/javascript/proxmox-widget-toolkit/widgets/datacenter.js"
+    )
+    local found=0
+
+    for js_file in "${js_files[@]}"; do
+        [[ ! -f "$js_file" ]] && continue
+        found=1
         backup_file "$js_file" "订阅广告修改"
-        sed -i.bak "s/if (data.status !== 'Active') {/if (false) {/" "$js_file"
-        systemctl restart pveproxy
-        $DIALOG --title "操作成功" --msgbox "弹窗已去除，请 Ctrl+F5 刷新浏览器网页。" 10 50
-    else
-        show_msg "未找到对应 JS 文件" "error"
+        # 兼容 PVE 6.x - 9.x 各种格式的弹窗判断
+        sed -i.bak \
+            -e "s/if (data.status !== 'Active')/if (false)/g" \
+            -e "s/if (data\.status !== 'Active')/if (false)/g" \
+            -e "s/if[[:space:]]*(data\.status[[:space:]]*!==[[:space:]]*'Active')/if (false)/g" \
+            -e "s/if (!data.status || data.status !== 'Active')/if (false)/g" \
+            "$js_file"
+    done
+
+    if [[ $found -eq 0 ]]; then
+        show_msg "未找到 JS 文件" "error"
+        return
     fi
+
+    systemctl restart pveproxy
+    $DIALOG --title "操作成功" --msgbox "弹窗已去除，请 Ctrl+F5 强制刷新浏览器网页。\n（如仍有弹窗，可能是浏览器缓存，请清理后重试）" 12 60
 }
 
 # --- 3. 找回全套监控工具安装 ---
