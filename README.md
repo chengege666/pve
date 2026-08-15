@@ -17,6 +17,24 @@
 
 ## 使用方法
 
+### 一键运行 (推荐)
+
+将 `<USER>/<REPO>` 替换为你的 GitHub 仓库地址，直接执行无需下载：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chengege666/pve/main/pve.sh | bash
+```
+
+或使用 wget:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/chengege666/pve/main/pve.sh | bash
+```
+
+> 若默认分支不是 `main` (如 `master`)，请将 URL 中的 `main` 改为对应分支名。
+
+### 手动下载运行
+
 1.  **下载脚本**:
     将 `pve.sh` 文件下载到您的 PVE 服务器上。
 
