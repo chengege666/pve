@@ -224,32 +224,7 @@ remove_subscription_notice() {
     $DIALOG --title "操作成功" --msgbox "弹窗已去除，请 Ctrl+F5 强制刷新浏览器网页。\n（如仍有弹窗，可能是浏览器缓存，请清理后重试）" 12 60
 }
 
-# --- 3. 找回全套监控工具安装 ---
-install_monitoring_tools() {
-    tools=$($DIALOG --title "安装监控工具" --checklist "空格键选择，回车键安装:" 20 65 8 \
-        "lm-sensors" "CPU温度、风扇监控" ON \
-        "smartmontools" "硬盘健康与寿命检测" ON \
-        "powertop" "系统功耗详细分析" OFF \
-        "nvme-cli" "NVMe SSD 专用管理工具" OFF \
-        "hddtemp" "传统硬盘温度监控" OFF \
-        "netdata" "酷炫的实时网页监控看板" OFF \
-        "stress-ng" "压力测试工具" OFF 3>&1 1>&2 2>&3)
-    
-    [[ -z "$tools" ]] && return
-    apt-get update
-    for tool in $tools; do
-        t=$(echo $tool | tr -d '"')
-        if [[ "$t" == "netdata" ]]; then
-            bash <(curl -Ss https://my-netdata.io/kickstart.sh) --non-interactive
-        else
-            apt-get install -y "$t"
-        fi
-        [[ "$t" == "lm-sensors" ]] && sensors-detect --auto
-    done
-    show_msg "所选工具安装完成" "success"
-}
-
-# --- 4. 找回详细电源模式选择 ---
+# --- 3. 找回详细电源模式选择 ---
 power_optimization_menu() {
     mode=$($DIALOG --title "电源方案预设" --menu "请选择工作场景：" 15 60 4 \
         "server" "高性能模式 (性能优先，忽略功耗)" \
@@ -309,30 +284,28 @@ main_menu() {
         res=$($DIALOG --title "PVE 终极优化脚本 v3.0" --menu "PVE 版本: $CURRENT_PVE_VERSION" 24 70 12 \
             1 "CPU 性能、调频与虚拟机优化" \
             2 "去除网页‘无有效订阅’弹窗" \
-            3 "安装全套监控工具 (温度/看板)" \
-            4 "电源工作模式一键预设 (节能/性能)" \
-            5 "查看当前系统运行状态" \
-            6 "一键回滚脚本所做的修改" \
-            7 "内存清理" \
-            8 "磁盘清理" \
-            9 "系统更新 (升级已安装软件包)" \
-            10 "更换软件源 (国内镜像源)" \
-            11 "概要信息增强 (CPU温度/频率/硬盘/UPS)" \
+            3 "电源工作模式一键预设 (节能/性能)" \
+            4 "查看当前系统运行状态" \
+            5 "一键回滚脚本所做的修改" \
+            6 "内存清理" \
+            7 "磁盘清理" \
+            8 "系统更新 (升级已安装软件包)" \
+            9 "更换软件源 (国内镜像源)" \
+            10 "概要信息增强 (CPU温度/频率/硬盘/UPS)" \
             0 "退出脚本" 3>&1 1>&2 2>&3)
 
         [[ -z "$res" || "$res" == "0" ]] && break
         case $res in
             1) cpu_optimization_menu ;;
             2) remove_subscription_notice ;;
-            3) install_monitoring_tools ;;
-            4) power_optimization_menu ;;
-            5) show_system_status ;;
-            6) rollback_all ;;
-            7) clear_memory ;;
-            8) clear_disk ;;
-            9) system_update ;;
-            10) change_apt_source ;;
-            11) pveInfo_menu ;;
+            3) power_optimization_menu ;;
+            4) show_system_status ;;
+            5) rollback_all ;;
+            6) clear_memory ;;
+            7) clear_disk ;;
+            8) system_update ;;
+            9) change_apt_source ;;
+            10) pveInfo_menu ;;
         esac
     done
 }
