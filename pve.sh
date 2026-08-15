@@ -586,154 +586,122 @@ choices_switch() {
 }
 
 pve_Info_Menu() {
-    keys=(0 1 2 3 4 5 6 7 8 9 a b c l r m j o p q x s)
+    local keys=(0 1 2 3 4 5 6 7 8 9 a b c l r m j o p q x s)
+    local preset=""
+    local detail=""
+    local pos=""
+    local pp=""
+    local kk=""
+    local k=""
+    local summary=""
+    local default_pos="r"
 
-    options[0]="CPU 实时主频"
-    options[1]="CPU 最小及最大主频 # (必选 0 )"
-    options[2]="CPU 线程主频"
-    options[3]="CPU 工作模式       # (必选 0 )"
-    options[4]="CPU 功率           # (必选 0 )"
-    options[5]="CPU 温度"
-    options[6]="CPU 核心温度       # 不支持 AMD (必选 5 )"
-    options[7]="核显温度           # 仅支持 AMD (必选 5 )"
-    options[8]="风扇转速           # 可能需要单独安装传感器驱动 (必选 5 )"
-    options[9]="UPS 信息           # 仅支持 apcupsd - apcaccess 软件包"
-    options[a]="硬盘基础信息       # 容量、寿命 (仅 NVME )、温度"
-    options[b]="硬盘通电信息       # 通电统计 (必选 a )"
-    options[c]="硬盘 IO 信息       # IO 负载 (必选 a )"
-    options[l]="概要信息: 居左显示"
-    options[r]="概要信息: 居右显示"
-    options[m]="概要信息: 居中显示"
-    options[j]="概要信息: 平铺显示"
-    options[o]="推荐方案一：高大全 # 除 UPS 信息以外全全部居右显示"
-    options[p]="推荐方案二：精简"
-    options[q]="推荐方案三：极简"
-    options[x]="一键清空           # 还原默认"
-    options[s]="跳过本次修改"
+    # 清空上次残留（防止重入复用）
+    for k in "${keys[@]}"; do unset choices[$k]; done
 
-    ERROR=" "
+    while true; do
+        # 第 1 步：预设方案菜单
+        preset=$($DIALOG --title "进度 2/${totalProgress}: 概要信息定制向导 - 方案选择" --menu \
+            "请选择配置方案，然后调整勾选项与显示位置。\n（必选联动: 1/3/4依赖0 ; 6/7/8依赖5 ; b/c依赖a ; l/r/m/j互斥）" \
+            20 80 9 \
+            o "推荐方案一：高大全（除UPS全勾 + 居右显示）" \
+            p "推荐方案二：精简（去掉核心温度/核显/通电统计/I/O等）" \
+            q "推荐方案三：极简（仅0/4/5/7/8/a + 居右）" \
+            c "自定义：手动勾选所有明细项" \
+            x "一键清空（全部不选）" \
+            s "跳过本次修改" 3>&1 1>&2 2>&3)
 
-    clear
+        [[ -z "$preset" ]] && return   # 用户取消，保持 choices 空
+        [[ "$preset" == "s" ]] && { choices[s]="*"; return; }
 
-    function MENU {
-        echoContent skyBlue "\n进度  2/${totalProgress} : PVE 概要信息定制向导"
-        echoContent red "=============================================================="
-        for NUM in ${keys[*]}; do
-            ymsg "[""${choices[$NUM]:- }""]" $NUM") ${options[$NUM]}"
+        # 清空明细项
+        for k in 0 1 2 3 4 5 6 7 8 9 a b c; do unset choices[$k]; done
+
+        case $preset in
+            o)  # 高大全：0-8 + a/b/c + 居右（跳过 UPS 9）
+                for k in 0 1 2 3 4 5 6 7 8 a b c r; do choices[$k]="*"; done
+                for k in 9 l m j o p q x s; do unset choices[$k]; done
+                ;;
+            p)  # 精简：0/2/3/4/5/6/7/8/a/b + 居右
+                for k in 0 2 3 4 5 6 7 8 a b r; do choices[$k]="*"; done
+                for k in 1 9 c l m j o p q x s; do unset choices[$k]; done
+                ;;
+            q)  # 极简：0/4/5/7/8/a + 居右
+                for k in 0 4 5 7 8 a r; do choices[$k]="*"; done
+                for k in 1 2 3 6 9 b c l m j o p q x s; do unset choices[$k]; done
+                ;;
+            c|x)
+                # 自定义 or 清空：不预设明细，交由 checklist 处理
+                ;;
+        esac
+
+        # 第 2 步：明细勾选 checklist（所有方案都过一遍，便于用户调整预设）
+        detail=$($DIALOG --title "概要信息定制向导 - 明细勾选（空格键切换）" --checklist \
+            "请勾选需要显示的内容：" \
+            28 95 20 \
+            0 "CPU 实时主频"    $([[ "${choices[0]}" == "*" ]] && echo ON || echo OFF) \
+            1 "CPU 最小及最大主频 (必选 0)"  $([[ "${choices[1]}" == "*" ]] && echo ON || echo OFF) \
+            2 "CPU 线程主频"    $([[ "${choices[2]}" == "*" ]] && echo ON || echo OFF) \
+            3 "CPU 工作模式 (必选 0)"  $([[ "${choices[3]}" == "*" ]] && echo ON || echo OFF) \
+            4 "CPU 功率 (必选 0)"  $([[ "${choices[4]}" == "*" ]] && echo ON || echo OFF) \
+            5 "CPU 温度"        $([[ "${choices[5]}" == "*" ]] && echo ON || echo OFF) \
+            6 "CPU 核心温度 (不支持AMD, 必选5)"  $([[ "${choices[6]}" == "*" ]] && echo ON || echo OFF) \
+            7 "核显温度 (仅支持AMD, 必选5)"  $([[ "${choices[7]}" == "*" ]] && echo ON || echo OFF) \
+            8 "风扇转速 (需单独传感器, 必选5)"  $([[ "${choices[8]}" == "*" ]] && echo ON || echo OFF) \
+            9 "UPS 信息 (仅apcupsd)"  $([[ "${choices[9]}" == "*" ]] && echo ON || echo OFF) \
+            a "硬盘基础信息 (容量/寿命/NVME温度)"  $([[ "${choices[a]}" == "*" ]] && echo ON || echo OFF) \
+            b "硬盘通电信息 (通电统计, 必选a)"  $([[ "${choices[b]}" == "*" ]] && echo ON || echo OFF) \
+            c "硬盘I/O信息 (IO负载, 必选a)"  $([[ "${choices[c]}" == "*" ]] && echo ON || echo OFF) \
+            3>&1 1>&2 2>&3)
+
+        # 用户取消 checklist，重新回到方案菜单
+        if [[ $? -ne 0 ]]; then continue; fi
+
+        # 清空明细后按用户勾选重设
+        for k in 0 1 2 3 4 5 6 7 8 9 a b c; do unset choices[$k]; done
+        for k in $detail; do
+            kk=$(echo "$k" | tr -d '"')
+            choices[$kk]="*"
         done
-        echoContent red "$ERROR"
-        echoContent red "=============================================================="
-    }
 
-    while MENU && read -e -p "根据菜单选择需要部署/取消, 按Enter结束: " -n1 SELECTION && [[ -n "$SELECTION" ]]; do
-        clear
-        if [[ ${options[$SELECTION]} ]]; then
-            case $SELECTION in
-                l)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in r m j; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                r)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in l m j; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                m)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in l r j; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                j)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in l r m; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                o)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in 0 1 2 3 4 5 6 7 8 a b c r; do
-                            choices[$i]=""
-                            choices_switch $i
-                        done
-                        for i in 9 l m j p q x s; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                p)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in 0 2 3 4 5 6 7 8 a b r; do
-                            choices[$i]=""
-                            choices_switch $i
-                        done
-                        for i in 1 9 c l m j o q x s; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                q)
-                    choices_switch $SELECTION
-                    if [[ "${choices[$SELECTION]}" = "*" ]]; then
-                        for i in 0 4 5 7 8 a r; do
-                            choices[$i]=""
-                            choices_switch $i
-                        done
-                        for i in 1 2 3 6 9 b c l m j o p x s; do
-                            choices[$i]="*"
-                            choices_switch $i
-                        done
-                    fi
-                    ;;
-                x)
-                    for i in ${keys[*]}; do
-                        choices[$i]="*"
-                        choices_switch $i
-                    done
-                    ;;
-                s)
-                    choices[s]="*"
-                    break
-                    ;;
-                *)
-                    choices_switch $SELECTION
-                    ;;
-            esac
+        # 必选联动：选 1/3/4 → 自动加 0；选 6/7/8 → 自动加 5；选 b/c → 自动加 a
+        if [[ "${choices[1]}" == "*" || "${choices[3]}" == "*" || "${choices[4]}" == "*" ]]; then choices[0]="*"; fi
+        if [[ "${choices[6]}" == "*" || "${choices[7]}" == "*" || "${choices[8]}" == "*" ]]; then choices[5]="*"; fi
+        if [[ "${choices[b]}" == "*" || "${choices[c]}" == "*" ]]; then choices[a]="*"; fi
 
-            if [[ "${choices[1]}" == "*" || "${choices[3]}" == "*" || "${choices[4]}" == "*" ]]; then
-                choices[0]=""
-                choices_switch 0
-            fi
-            if [[ "${choices[6]}" == "*" || "${choices[7]}" == "*" || "${choices[8]}" == "*" ]]; then
-                choices[5]=""
-                choices_switch 5
-            fi
-            if [[ "${choices[b]}" == "*" || "${choices[c]}" == "*" ]]; then
-                choices[a]=""
-                choices_switch a
-            fi
+        # 第 3 步：位置单选
+        default_pos="r"
+        if [[ "${choices[l]}" == "*" ]]; then default_pos="l"
+        elif [[ "${choices[r]}" == "*" ]]; then default_pos="r"
+        elif [[ "${choices[m]}" == "*" ]]; then default_pos="m"
+        elif [[ "${choices[j]}" == "*" ]]; then default_pos="j"
+        fi
 
-        else
-            ERROR=" ---> 非法参数: $SELECTION"
+        pos=$($DIALOG --title "概要信息定制向导 - 显示位置（单选）" --radiolist \
+            "请选择概要信息在页面中的显示位置：" 14 60 5 \
+            l "居左显示"   $([[ "$default_pos" == "l" ]] && echo ON || echo OFF) \
+            r "居右显示"   $([[ "$default_pos" == "r" ]] && echo ON || echo OFF) \
+            m "居中显示"   $([[ "$default_pos" == "m" ]] && echo ON || echo OFF) \
+            j "平铺显示"   $([[ "$default_pos" == "j" ]] && echo ON || echo OFF) \
+            3>&1 1>&2 2>&3)
+        if [[ $? -ne 0 ]]; then continue; fi
+
+        # 位置互斥
+        for k in l r m j; do unset choices[$k]; done
+        pp=$(echo "$pos" | tr -d '"')
+        [[ -n "$pp" ]] && choices[$pp]="*"
+
+        # 第 4 步：二次确认
+        summary=""
+        for k in 0 1 2 3 4 5 6 7 8 9 a b c l r m j; do
+            [[ "${choices[$k]}" == "*" ]] && summary+="${k} "
+        done
+        [[ -z "$summary" ]] && summary="（无勾选项）"
+
+        $DIALOG --title "概要信息定制 - 确认" --yesno \
+            "当前将应用以下配置（勾选代码）：\n\n  ${summary}\n\n是否确认并继续？" 14 80
+        if [[ $? -eq 0 ]]; then
+            return
         fi
     done
 }
