@@ -17,7 +17,7 @@ NC='\033[0m'
 BACKUP_DIR="/root/pve_backup_$(date +%Y%m%d_%H%M%S)"
 ROLLBACK_FILE="$BACKUP_DIR/rollback.log"
 CURRENT_PVE_VERSION=$(pveversion 2>/dev/null | grep -oP 'pve-manager/\K\d+\.\d+' || echo "未知")
-DIALOG="none"
+DIALOG="tui"   # 使用内置终端交互界面（菜单直接显示在终端，不弹窗）
 
 # 多选菜单关联数组
 declare -A options
@@ -35,10 +35,214 @@ show_msg() {
     esac
 }
 
+# ================================================
+# 内置终端交互函数（替代 whiptail 弹窗，直接显示在终端）
+# 兼容 whiptail 参数格式：--title / --menu / --checklist /
+# --radiolist / --inputbox / --msgbox / --yesno
+# 说明：被 $() 捕获的调用带有 3>&1 1>&2 2>&3 重定向，
+#       此时函数内 stdout 用于显示界面，stderr 用于输出结果值
+# ================================================
+
+# 统一入口：解析 --title 后按子命令分发
+tui() {
+    local title="PVE 优化脚本"
+    local rest=()
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --title) title="$2"; shift 2 ;;
+            *) rest+=("$1"); shift ;;
+        esac
+    done
+    local cmd="${rest[0]}"
+    case $cmd in
+        --menu)      _tui_menu "$title" "${rest[@]:1}" ;;
+        --checklist) _tui_checklist "$title" "${rest[@]:1}" ;;
+        --radiolist) _tui_radiolist "$title" "${rest[@]:1}" ;;
+        --inputbox)  _tui_inputbox "$title" "${rest[@]:1}" ;;
+        --msgbox)    _tui_msgbox "$title" "${rest[@]:1}" ;;
+        --yesno)     _tui_yesno "$title" "${rest[@]:1}" ;;
+        *) return 1 ;;
+    esac
+}
+
+# 菜单：输入编号单选；直接回车=取消/返回
+_tui_menu() {
+    local title="$1" prompt="$2"
+    shift 2   # 跳过 标题、提示
+    shift 3   # 跳过 高度、宽度、条数
+    local tags=() descs=()
+    while [[ $# -ge 2 ]]; do tags+=("$1"); descs+=("$2"); shift 2; done
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$prompt"
+    local i input
+    for ((i=0; i<${#tags[@]}; i++)); do
+        printf '  %s) %s\n' "${tags[$i]}" "${descs[$i]}"
+    done
+    while true; do
+        printf '%s' "请输入编号 (直接回车=返回): "
+        read -r input || { echo "" >&2; return 1; }
+        [[ -z "$input" ]] && { echo "" >&2; return 1; }
+        for ((i=0; i<${#tags[@]}; i++)); do
+            if [[ "${tags[$i]}" == "$input" ]]; then
+                echo "${tags[$i]}" >&2
+                return 0
+            fi
+        done
+        echo "  无效编号，请重新输入"
+    done
+}
+
+# 勾选列表：多选；输入编号(空格分隔)勾选，all=全选，回车=确认当前勾选，q=取消
+_tui_checklist() {
+    local title="$1" prompt="$2"
+    shift 2   # 跳过 标题、提示
+    shift 3   # 跳过 高度、宽度、条数
+    local tags=() descs=() states=()
+    while [[ $# -ge 3 ]]; do tags+=("$1"); descs+=("$2"); states+=("$3"); shift 3; done
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$prompt"
+    local i mark input t ok found
+    for ((i=0; i<${#tags[@]}; i++)); do
+        [[ "${states[$i]}" == "ON" ]] && mark="[x]" || mark="[ ]"
+        printf '  %s %s) %s\n' "$mark" "${tags[$i]}" "${descs[$i]}"
+    done
+    while true; do
+        printf '%s' "输入要勾选的编号(空格分隔) / all=全选 / 回车=确认 / q=取消: "
+        local sel=()
+        read -r input || { echo "" >&2; return 1; }
+        if [[ "$input" == "q" || "$input" == "Q" ]]; then
+            echo "" >&2
+            return 1
+        fi
+        if [[ -z "$input" ]]; then
+            for ((i=0; i<${#tags[@]}; i++)); do
+                [[ "${states[$i]}" == "ON" ]] && sel+=("${tags[$i]}")
+            done
+        elif [[ "$input" == "all" || "$input" == "ALL" ]]; then
+            for ((i=0; i<${#tags[@]}; i++)); do sel+=("${tags[$i]}"); done
+        else
+            ok=1
+            for t in $input; do
+                found=0
+                for ((i=0; i<${#tags[@]}; i++)); do
+                    [[ "${tags[$i]}" == "$t" ]] && { found=1; break; }
+                done
+                if [[ $found -eq 1 ]]; then
+                    sel+=("$t")
+                else
+                    echo "  无效编号: $t"
+                    ok=0
+                fi
+            done
+            [[ $ok -eq 0 ]] && continue
+        fi
+        local out=""
+        for t in "${sel[@]}"; do out+="\"$t\" "; done
+        echo "${out% }" >&2
+        return 0
+    done
+}
+
+# 单选列表：输入一个编号选择；回车=确认当前选中，q=取消
+_tui_radiolist() {
+    local title="$1" prompt="$2"
+    shift 2   # 跳过 标题、提示
+    shift 3   # 跳过 高度、宽度、条数
+    local tags=() descs=() states=()
+    while [[ $# -ge 3 ]]; do tags+=("$1"); descs+=("$2"); states+=("$3"); shift 3; done
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$prompt"
+    local i mark cur="" input
+    for ((i=0; i<${#tags[@]}; i++)); do
+        [[ "${states[$i]}" == "ON" ]] && mark="(●)" || mark="( )"
+        [[ "${states[$i]}" == "ON" ]] && cur="${tags[$i]}"
+        printf '  %s %s) %s\n' "$mark" "${tags[$i]}" "${descs[$i]}"
+    done
+    while true; do
+        printf '%s' "输入单个编号选择 / 回车=确认当前 / q=取消: "
+        read -r input || { echo "" >&2; return 1; }
+        if [[ "$input" == "q" || "$input" == "Q" ]]; then
+            echo "" >&2
+            return 1
+        fi
+        if [[ -z "$input" ]]; then
+            echo "\"$cur\"" >&2
+            return 0
+        fi
+        for ((i=0; i<${#tags[@]}; i++)); do
+            if [[ "${tags[$i]}" == "$input" ]]; then
+                echo "\"${tags[$i]}\"" >&2
+                return 0
+            fi
+        done
+        echo "  无效编号，请重新输入"
+    done
+}
+
+# 输入框：回车=使用默认值，-=取消
+_tui_inputbox() {
+    local title="$1" prompt="$2"
+    shift 2   # 跳过 标题、提示
+    shift 2   # 跳过 高度、宽度
+    local init=""
+    [[ $# -gt 0 ]] && init="$1"
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$prompt"
+    local input
+    if [[ -n "$init" ]]; then
+        printf '%s' "请输入 (回车=$init / -=取消): "
+    else
+        printf '%s' "请输入 (-=取消): "
+    fi
+    read -r input || { echo "" >&2; return 1; }
+    if [[ "$input" == "-" ]]; then
+        echo "" >&2
+        return 1
+    fi
+    [[ -z "$input" ]] && input="$init"
+    echo "$input" >&2
+    return 0
+}
+
+# 消息框：显示内容后按回车继续
+_tui_msgbox() {
+    local title="$1"
+    local msg="$2"
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$msg"
+    printf '%s' "按回车键继续..."
+    read -r
+    return 0
+}
+
+# 是/否询问：y=是(返回0)，n=否(返回1)
+_tui_yesno() {
+    local title="$1"
+    local msg="$2"
+    echo ""
+    printf '%b\n' "${CYAN}────── $title ──────${NC}"
+    printf '%b\n' "$msg"
+    local ans
+    while true; do
+        printf '%s' "请选择 [y=是 / n=否]: "
+        read -r ans || return 1
+        case "$ans" in
+            y|Y|yes|Yes|YES) return 0 ;;
+            n|N|no|No|NO)    return 1 ;;
+            *) echo "  无效输入，请输入 y 或 n" ;;
+        esac
+    done
+}
+
 # 环境与工具检查
 check_env() {
     [[ $EUID -ne 0 ]] && { show_msg "必须以 root 运行" "error"; exit 1; }
-    if command -v whiptail &> /dev/null; then DIALOG=whiptail; elif command -v dialog &> /dev/null; then DIALOG=dialog; else DIALOG="none"; fi
+    DIALOG="tui"   # 使用内置终端交互界面，无需依赖 whiptail/dialog
 }
 
 # 自动备份函数
