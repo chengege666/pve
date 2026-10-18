@@ -17,7 +17,7 @@ NC='\033[0m'
 BACKUP_DIR="/root/pve_backup_$(date +%Y%m%d_%H%M%S)"
 ROLLBACK_FILE="$BACKUP_DIR/rollback.log"
 CURRENT_PVE_VERSION=$(pveversion 2>/dev/null | grep -oP 'pve-manager/\K\d+\.\d+' || echo "未知")
-DIALOG="none"
+DIALOG="tui"
 
 # 多选菜单关联数组
 declare -A options
@@ -35,10 +35,287 @@ show_msg() {
     esac
 }
 
+# ================================================
+# 终端交互界面（替代 whiptail/dialog）
+# 说明：界面输出到 stdout，选择结果输出到 stderr，
+#       以兼容原有 "$DIALOG ... 3>&1 1>&2 2>&3" 写法。
+# ================================================
+
+# 输出标题与说明文字
+tui_header() {
+    local title="$1"
+    local text="$2"
+    echo ""
+    echo "=============================================================="
+    [[ -n "$title" ]] && echo "  $title"
+    echo "=============================================================="
+    [[ -n "$text" ]] && echo -e "$text"
+    echo ""
+}
+
+# 菜单选择
+tui_menu() {
+    local title="$1"
+    local text="$2"
+    shift 2
+    if [[ $# -ge 3 ]]; then shift 3; else shift $#; fi
+
+    local tags=()
+    local descs=()
+    while [[ $# -ge 2 ]]; do
+        tags+=("$1")
+        descs+=("$2")
+        shift 2
+    done
+    [[ ${#tags[@]} -eq 0 ]] && return 1
+
+    local i choice
+    while true; do
+        tui_header "$title" "$text"
+        for ((i = 0; i < ${#tags[@]}; i++)); do
+            printf "  %-6s %s\n" "${tags[$i]}" "${descs[$i]}"
+        done
+        echo ""
+        printf "请输入编号/代码（直接回车返回）: "
+        if ! read -r choice; then
+            echo ""
+            return 1
+        fi
+        choice="${choice//[[:space:]]/}"
+        [[ -z "$choice" ]] && return 1
+
+        # 优先匹配原始 tag，其次按显示序号
+        for ((i = 0; i < ${#tags[@]}; i++)); do
+            if [[ "$choice" == "${tags[$i]}" ]]; then
+                echo "$choice" >&2
+                return 0
+            fi
+        done
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#tags[@]} )); then
+            echo "${tags[$((choice - 1))]}" >&2
+            return 0
+        fi
+        echo "无效选择，请重新输入。"
+    done
+}
+
+# 多选清单
+tui_checklist() {
+    local title="$1"
+    local text="$2"
+    shift 2
+    if [[ $# -ge 3 ]]; then shift 3; else shift $#; fi
+
+    local tags=()
+    local descs=()
+    local states=()
+    while [[ $# -ge 3 ]]; do
+        tags+=("$1")
+        descs+=("$2")
+        states+=("$3")
+        shift 3
+    done
+    [[ ${#tags[@]} -eq 0 ]] && return 1
+
+    local i token input selected found
+    while true; do
+        tui_header "$title" "$text"
+        for ((i = 0; i < ${#tags[@]}; i++)); do
+            if [[ "${states[$i]}" == "ON" ]]; then
+                printf "  [*] %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+            else
+                printf "  [ ] %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+            fi
+        done
+        echo ""
+        echo "输入编号切换勾选状态（可一次输入多个，用空格分隔）"
+        printf "输入 d 或直接回车完成，输入 q 取消: "
+        if ! read -r input; then
+            echo ""
+            return 1
+        fi
+        input="${input//,/ }"
+        case "$input" in
+            ""|d|D)
+                selected=""
+                for ((i = 0; i < ${#tags[@]}; i++)); do
+                    [[ "${states[$i]}" == "ON" ]] && selected+="\"${tags[$i]}\" "
+                done
+                echo "$selected" >&2
+                return 0
+                ;;
+            q|Q)
+                return 1
+                ;;
+        esac
+
+        for token in $input; do
+            found=0
+            for ((i = 0; i < ${#tags[@]}; i++)); do
+                if [[ "$token" == "${tags[$i]}" ]]; then
+                    if [[ "${states[$i]}" == "ON" ]]; then states[$i]="OFF"; else states[$i]="ON"; fi
+                    found=1
+                    break
+                fi
+            done
+            if [[ $found -eq 0 && "$token" =~ ^[0-9]+$ ]] && (( token >= 1 && token <= ${#tags[@]} )); then
+                i=$((token - 1))
+                if [[ "${states[$i]}" == "ON" ]]; then states[$i]="OFF"; else states[$i]="ON"; fi
+                found=1
+            fi
+            [[ $found -eq 0 ]] && echo "忽略无效编号: $token"
+        done
+    done
+}
+
+# 单选清单
+tui_radiolist() {
+    local title="$1"
+    local text="$2"
+    shift 2
+    if [[ $# -ge 3 ]]; then shift 3; else shift $#; fi
+
+    local tags=()
+    local descs=()
+    local states=()
+    while [[ $# -ge 3 ]]; do
+        tags+=("$1")
+        descs+=("$2")
+        states+=("$3")
+        shift 3
+    done
+    [[ ${#tags[@]} -eq 0 ]] && return 1
+
+    local i current=0 choice
+    for ((i = 0; i < ${#tags[@]}; i++)); do
+        [[ "${states[$i]}" == "ON" ]] && current=$i
+    done
+
+    tui_header "$title" "$text"
+    for ((i = 0; i < ${#tags[@]}; i++)); do
+        if [[ $i -eq $current ]]; then
+            printf "  (*) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+        else
+            printf "  ( ) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+        fi
+    done
+    echo ""
+    printf "请输入编号选择（直接回车保留当前，q 取消）: "
+    if ! read -r choice; then
+        echo ""
+        return 1
+    fi
+    choice="${choice//[[:space:]]/}"
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
+    [[ -z "$choice" ]] && { echo "${tags[$current]}" >&2; return 0; }
+
+    for ((i = 0; i < ${#tags[@]}; i++)); do
+        if [[ "$choice" == "${tags[$i]}" ]]; then
+            echo "$choice" >&2
+            return 0
+        fi
+    done
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#tags[@]} )); then
+        echo "${tags[$((choice - 1))]}" >&2
+        return 0
+    fi
+    echo "无效选择。" >&2
+    return 1
+}
+
+# 输入框
+tui_inputbox() {
+    local title="$1"
+    local text="$2"
+    local default="${5:-}"
+
+    tui_header "$title" "$text"
+    if [[ -n "$default" ]]; then
+        printf "请输入（直接回车使用默认值 %s）: " "$default"
+    else
+        printf "请输入: "
+    fi
+    local value
+    if ! read -r value; then
+        echo ""
+        return 1
+    fi
+    [[ -z "$value" ]] && value="$default"
+    echo "$value" >&2
+    return 0
+}
+
+# 消息框
+tui_msgbox() {
+    local title="$1"
+    local text="$2"
+    tui_header "$title" "$text"
+    printf "按回车键继续..."
+    read -r _ || true
+    echo ""
+    return 0
+}
+
+# 是/否确认
+tui_yesno() {
+    local title="$1"
+    local text="$2"
+    tui_header "$title" "$text"
+    local answer
+    while true; do
+        printf "请确认 (Y/n): "
+        if ! read -r answer; then
+            echo ""
+            return 1
+        fi
+        case "$answer" in
+            ""|[Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "请输入 Y 或 n。" ;;
+        esac
+    done
+}
+
+# 兼容 whiptail 参数格式的统一入口
+tui() {
+    local title=""
+    local kind=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --title)
+                title="${2:-}"
+                shift 2
+                ;;
+            --menu|--checklist|--radiolist|--inputbox|--msgbox|--yesno)
+                kind="${1#--}"
+                shift
+                break
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    local text="${1:-}"
+    [[ -n "$text" ]] && shift
+
+    case "$kind" in
+        menu) tui_menu "$title" "$text" "$@" ;;
+        checklist) tui_checklist "$title" "$text" "$@" ;;
+        radiolist) tui_radiolist "$title" "$text" "$@" ;;
+        inputbox) tui_inputbox "$title" "$text" "$@" ;;
+        msgbox) tui_msgbox "$title" "$text" ;;
+        yesno) tui_yesno "$title" "$text" ;;
+        *) echo "不支持的交互类型: $kind" >&2; return 1 ;;
+    esac
+}
+
 # 环境与工具检查
 check_env() {
     [[ $EUID -ne 0 ]] && { show_msg "必须以 root 运行" "error"; exit 1; }
-    if command -v whiptail &> /dev/null; then DIALOG=whiptail; elif command -v dialog &> /dev/null; then DIALOG=dialog; else DIALOG="none"; fi
+    # 固定使用脚本内置的终端交互界面，不再依赖 whiptail/dialog
+    DIALOG="tui"
 }
 
 # 自动备份函数
@@ -633,7 +910,7 @@ pve_Info_Menu() {
         esac
 
         # 第 2 步：明细勾选 checklist（所有方案都过一遍，便于用户调整预设）
-        detail=$($DIALOG --title "概要信息定制向导 - 明细勾选（空格键切换）" --checklist \
+        detail=$($DIALOG --title "概要信息定制向导 - 明细勾选（输入编号切换）" --checklist \
             "请勾选需要显示的内容：" \
             28 95 20 \
             0 "CPU 实时主频"    $([[ "${choices[0]}" == "*" ]] && echo ON || echo OFF) \
