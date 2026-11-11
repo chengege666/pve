@@ -558,6 +558,7 @@ main_menu() {
             8 "系统更新 (升级已安装软件包)" \
             9 "更换软件源 (国内镜像源)" \
             10 "概要信息增强 (CPU温度/频率/硬盘/UPS)" \
+            11 "断网自愈监控 (网络故障自动恢复)" \
             0 "退出脚本" 3>&1 1>&2 2>&3)
 
         [[ -z "$res" || "$res" == "0" ]] && break
@@ -572,6 +573,7 @@ main_menu() {
             8) system_update ;;
             9) change_apt_source ;;
             10) pveInfo_menu ;;
+            11) netwatch_menu ;;
         esac
     done
 }
@@ -2638,6 +2640,388 @@ pveInfo_menu() {
             3)
                 totalProgress=1
                 recovery_info_online
+                read -n 1 -s -r -p $'\n按任意键返回子菜单...'
+                echo
+                ;;
+        esac
+    done
+}
+
+# --- 11. 断网自愈监控功能 ---
+# 配置: /etc/pve_netwatch.conf  日志: /var/log/pve_netwatch.log
+# worker: /usr/local/bin/pve-netwatch (crontab 静默调用 --cron)
+NETWATCH_CONF="/etc/pve_netwatch.conf"
+NETWATCH_LOG="/var/log/pve_netwatch.log"
+NETWATCH_BIN="/usr/local/bin/pve-netwatch"
+NETWATCH_TAG="PVE-NETWATCH"
+
+# 读取配置（带默认空值，不覆盖已有全局变量以外的内容）
+netwatch_load_conf() {
+    NW_TARGET1=""
+    NW_TARGET2=""
+    NW_INTERVAL_MIN=""
+    NW_UPTIME_GUARD=""
+    NW_ACTION=""
+    if [[ -f "$NETWATCH_CONF" ]]; then
+        source "$NETWATCH_CONF"
+    fi
+}
+
+# 检测监控是否已启用（crontab 中存在本工具任务）
+netwatch_is_enabled() {
+    crontab -l 2>/dev/null | grep -q "$NETWATCH_TAG"
+}
+
+# 自愈动作中文名称
+netwatch_action_name() {
+    case "$1" in
+        1) echo "整机重启 (reboot)" ;;
+        2) echo "重启网络服务 (systemctl restart networking)" ;;
+        *) echo "未知 ($1)" ;;
+    esac
+}
+
+# 功能 1：查看当前状态与网络探测
+netwatch_status() {
+    netwatch_load_conf
+    echo ""
+    echo "=============================================================="
+    echo "  断网自愈监控 - 当前状态"
+    echo "=============================================================="
+
+    # 定时监控状态
+    if netwatch_is_enabled && [[ -x "$NETWATCH_BIN" ]]; then
+        show_msg "定时监控: ${GREEN}已启用${NC} (crontab 已配置)" "info"
+    elif netwatch_is_enabled; then
+        show_msg "定时监控: ${YELLOW}异常${NC} (crontab 存在但 worker 缺失，请重新配置)" "warning"
+    else
+        show_msg "定时监控: ${RED}未启用${NC}" "info"
+    fi
+
+    # 配置参数
+    if [[ -f "$NETWATCH_CONF" ]]; then
+        echo ""
+        echo "  监控参数:"
+        echo "    目标 IP 1 (网关)   : $NW_TARGET1"
+        echo "    目标 IP 2 (公网DNS): $NW_TARGET2"
+        echo "    检测周期           : 每 ${NW_INTERVAL_MIN} 分钟"
+        echo "    开机保护期         : ${NW_UPTIME_GUARD} 秒"
+        echo "    自愈动作           : $(netwatch_action_name "$NW_ACTION")"
+    else
+        echo ""
+        show_msg "尚未生成配置文件 ($NETWATCH_CONF)" "warning"
+    fi
+
+    # 现场探测
+    echo ""
+    echo "  网络探测 (ping -c 3 -W 2):"
+    local t
+    for t in "$NW_TARGET1" "$NW_TARGET2"; do
+        [[ -z "$t" ]] && continue
+        if ping -c 3 -W 2 "$t" >/dev/null 2>&1; then
+            show_msg "目标 $t : ${GREEN}OK (通畅)${NC}" "info"
+        else
+            show_msg "目标 $t : ${RED}FAILED (不通)${NC}" "info"
+        fi
+    done
+    if [[ -z "$NW_TARGET1" && -z "$NW_TARGET2" ]]; then
+        echo "    (未配置目标 IP，无法探测)"
+    fi
+
+    # 最近 3 条故障触发日志
+    echo ""
+    echo "  最近故障触发日志:"
+    if [[ -f "$NETWATCH_LOG" ]] && grep -q "告警" "$NETWATCH_LOG" 2>/dev/null; then
+        grep "告警" "$NETWATCH_LOG" | tail -n 3 | sed 's/^/    /'
+    else
+        echo "    (暂无故障触发记录)"
+    fi
+    echo ""
+}
+
+# 功能 2：开启 / 修改配置并启用检测
+netwatch_configure() {
+    netwatch_load_conf
+    echo ""
+    echo "=============================================================="
+    echo "  断网自愈监控 - 配置向导"
+    echo "=============================================================="
+    echo "  说明: 同时 ping 两个目标，仅当两者均超时不通时才判定断网。"
+    echo "        开机保护期内 (uptime 小于设定秒数) 绝不触发，防止死循环。"
+    echo ""
+
+    local input def_gw
+
+    # 自动探测默认网关作为目标 1 默认值
+    def_gw=$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')
+    [[ -z "$def_gw" ]] && def_gw="192.168.1.1"
+    [[ -z "$NW_TARGET1" ]] && NW_TARGET1="$def_gw"
+    [[ -z "$NW_TARGET2" ]] && NW_TARGET2="223.5.5.5"
+    [[ -z "$NW_INTERVAL_MIN" ]] && NW_INTERVAL_MIN="5"
+    [[ -z "$NW_UPTIME_GUARD" ]] && NW_UPTIME_GUARD="600"
+    [[ -z "$NW_ACTION" ]] && NW_ACTION="1"
+
+    # 目标 IP 1
+    while true; do
+        read -r -p "目标 IP 1 (网关) [$NW_TARGET1]: " input
+        [[ -z "$input" ]] && input="$NW_TARGET1"
+        if [[ "$input" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            NW_TARGET1="$input"; break
+        fi
+        show_msg "IP 格式不正确，请重新输入。" "error"
+    done
+
+    # 目标 IP 2
+    while true; do
+        read -r -p "目标 IP 2 (公网 DNS) [$NW_TARGET2]: " input
+        [[ -z "$input" ]] && input="$NW_TARGET2"
+        if [[ "$input" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            NW_TARGET2="$input"; break
+        fi
+        show_msg "IP 格式不正确，请重新输入。" "error"
+    done
+
+    # 检测频率
+    while true; do
+        read -r -p "检测频率 (分钟, 正整数) [$NW_INTERVAL_MIN]: " input
+        [[ -z "$input" ]] && input="$NW_INTERVAL_MIN"
+        if [[ "$input" =~ ^[1-9][0-9]*$ ]]; then
+            NW_INTERVAL_MIN="$input"; break
+        fi
+        show_msg "请输入正整数。" "error"
+    done
+
+    # 开机保护期
+    while true; do
+        read -r -p "开机防死循环保护期 (秒) [$NW_UPTIME_GUARD]: " input
+        [[ -z "$input" ]] && input="$NW_UPTIME_GUARD"
+        if [[ "$input" =~ ^[1-9][0-9]*$ ]]; then
+            NW_UPTIME_GUARD="$input"; break
+        fi
+        show_msg "请输入正整数。" "error"
+    done
+
+    # 自愈动作
+    while true; do
+        read -r -p "自愈动作 (1-整机重启 reboot / 2-重启网络服务) [$NW_ACTION]: " input
+        [[ -z "$input" ]] && input="$NW_ACTION"
+        if [[ "$input" == "1" || "$input" == "2" ]]; then
+            NW_ACTION="$input"; break
+        fi
+        show_msg "请输入 1 或 2。" "error"
+    done
+
+    # 汇总确认
+    echo ""
+    show_msg "配置汇总:" "info"
+    echo "    目标 IP 1 (网关)   : $NW_TARGET1"
+    echo "    目标 IP 2 (公网DNS): $NW_TARGET2"
+    echo "    检测周期           : 每 $NW_INTERVAL_MIN 分钟"
+    echo "    开机保护期         : $NW_UPTIME_GUARD 秒"
+    echo "    自愈动作           : $(netwatch_action_name "$NW_ACTION")"
+    echo ""
+    read -r -p "确认保存并启用定时监控? (y/N): " input
+    if [[ ! "$input" =~ ^[Yy]$ ]]; then
+        show_msg "已取消，未做任何修改。" "warning"
+        return 1
+    fi
+
+    # 1. 写配置文件
+    cat > "$NETWATCH_CONF" <<EOF
+# PVE 断网自愈监控配置 (由 pve.sh 生成)
+NW_TARGET1="$NW_TARGET1"
+NW_TARGET2="$NW_TARGET2"
+NW_INTERVAL_MIN="$NW_INTERVAL_MIN"
+NW_UPTIME_GUARD="$NW_UPTIME_GUARD"
+NW_ACTION="$NW_ACTION"
+EOF
+
+    # 2. 生成 worker 脚本 (cron 静默调用)
+    cat > "$NETWATCH_BIN" <<'NW_EOF'
+#!/bin/bash
+# ================================================
+# PVE 断网自愈监控 worker (由 pve.sh 生成)
+# 用法: pve-netwatch --cron   (供 crontab 静默调用)
+# ================================================
+NETWATCH_CONF="/etc/pve_netwatch.conf"
+NETWATCH_LOG="/var/log/pve_netwatch.log"
+
+# 配置文件不存在时直接退出，绝不误动作
+[[ -f "$NETWATCH_CONF" ]] || exit 0
+source "$NETWATCH_CONF"
+
+# 开机缓冲保护: uptime 小于保护期直接退出，防止真断网时无限重启
+up_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null)
+[[ -z "$up_sec" ]] && up_sec=0
+guard=${NW_UPTIME_GUARD:-600}
+[[ "$guard" =~ ^[0-9]+$ ]] || guard=600
+if [[ "$up_sec" -lt "$guard" ]]; then
+    exit 0
+fi
+
+# 多目标容灾检测: 任一目标为空不判定，两个目标均完全不通才判定断网
+if [[ -z "${NW_TARGET1:-}" || -z "${NW_TARGET2:-}" ]]; then
+    exit 0
+fi
+ok1=0
+ok2=0
+ping -c 3 -W 2 "$NW_TARGET1" >/dev/null 2>&1 && ok1=1
+ping -c 3 -W 2 "$NW_TARGET2" >/dev/null 2>&1 && ok2=1
+if [[ "$ok1" -eq 1 || "$ok2" -eq 1 ]]; then
+    exit 0
+fi
+
+# 判定断网: 写告警日志 -> sync -> 执行自愈动作
+case "${NW_ACTION:-1}" in
+    2) act="重启网络服务 (systemctl restart networking)" ;;
+    *) act="整机重启 (reboot)" ;;
+esac
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [告警] 双目标失联: $NW_TARGET1 / $NW_TARGET2, 已触发自愈: $act" >> "$NETWATCH_LOG"
+sync
+case "${NW_ACTION:-1}" in
+    2) systemctl restart networking ;;
+    *) /sbin/reboot ;;
+esac
+
+# 日志裁剪: 仅保留最近 500 行，防止无限膨胀
+if [[ -f "$NETWATCH_LOG" ]] && [[ $(wc -l < "$NETWATCH_LOG") -gt 500 ]]; then
+    tail -n 500 "$NETWATCH_LOG" > "${NETWATCH_LOG}.tmp" && mv "${NETWATCH_LOG}.tmp" "$NETWATCH_LOG"
+fi
+exit 0
+NW_EOF
+    chmod 755 "$NETWATCH_BIN"
+    if [[ ! -x "$NETWATCH_BIN" ]]; then
+        show_msg "写入 worker 失败 ($NETWATCH_BIN)" "error"
+        return 1
+    fi
+
+    # 3. 更新 crontab (幂等: 先清理旧条目再追加，空 crontab 容错)
+    local cron_expr tmp_cron
+    if [[ "$NW_INTERVAL_MIN" -le 1 ]]; then
+        cron_expr="* * * * *"
+    else
+        cron_expr="*/$NW_INTERVAL_MIN * * * *"
+    fi
+    tmp_cron=$(mktemp)
+    if [[ -z "$tmp_cron" || ! -f "$tmp_cron" ]]; then
+        show_msg "创建临时文件失败" "error"
+        return 1
+    fi
+    crontab -l 2>/dev/null | grep -v "$NETWATCH_TAG" > "$tmp_cron" || true
+    echo "$cron_expr $NETWATCH_BIN --cron >/dev/null 2>&1 # $NETWATCH_TAG" >> "$tmp_cron"
+    if crontab "$tmp_cron" 2>/dev/null; then
+        rm -f "$tmp_cron"
+        show_msg "crontab 定时任务已更新 (每 $NW_INTERVAL_MIN 分钟检测一次)。" "success"
+    else
+        rm -f "$tmp_cron"
+        show_msg "crontab 写入失败，请检查 cron 服务是否运行。" "error"
+        return 1
+    fi
+
+    show_msg "断网自愈监控已启用。" "success"
+}
+
+# 功能 3：停止并卸载监控
+netwatch_uninstall() {
+    if ! netwatch_is_enabled && [[ ! -f "$NETWATCH_BIN" ]]; then
+        show_msg "监控未启用，无需卸载。" "warning"
+        return 0
+    fi
+    echo ""
+    read -r -p "确认停止并卸载断网自愈监控? (y/N): " input
+    if [[ ! "$input" =~ ^[Yy]$ ]]; then
+        show_msg "已取消。" "warning"
+        return 1
+    fi
+
+    # 从 crontab 清理任务 (空 crontab 容错)
+    local tmp_cron
+    tmp_cron=$(mktemp)
+    if [[ -z "$tmp_cron" || ! -f "$tmp_cron" ]]; then
+        show_msg "创建临时文件失败" "error"
+        return 1
+    fi
+    crontab -l 2>/dev/null | grep -v "$NETWATCH_TAG" > "$tmp_cron" || true
+    if crontab "$tmp_cron" 2>/dev/null; then
+        show_msg "crontab 定时任务已清除。" "success"
+    else
+        show_msg "crontab 更新失败，请手动检查 crontab -l。" "error"
+    fi
+    rm -f "$tmp_cron"
+
+    # 删除 worker (配置与日志保留，重新开启不丢失参数)
+    if [[ -f "$NETWATCH_BIN" ]]; then
+        rm -f "$NETWATCH_BIN" && show_msg "worker 已删除 ($NETWATCH_BIN)。" "success"
+    fi
+
+    show_msg "监控已停止。配置 ($NETWATCH_CONF) 与日志 ($NETWATCH_LOG) 已保留。" "success"
+}
+
+# 功能 4：查看历史日志
+netwatch_view_log() {
+    if [[ ! -f "$NETWATCH_LOG" ]] || [[ ! -s "$NETWATCH_LOG" ]]; then
+        show_msg "日志为空或不存在 ($NETWATCH_LOG)。" "warning"
+        return 0
+    fi
+    echo ""
+    echo "=============================================================="
+    echo "  断网自愈监控 - 日志 ($NETWATCH_LOG)"
+    echo "=============================================================="
+    tail -n 50 "$NETWATCH_LOG"
+    echo ""
+    show_msg "仅显示最近 50 行，完整日志请查看 $NETWATCH_LOG" "info"
+}
+
+# 功能 5：清空日志
+netwatch_clear_log() {
+    if [[ ! -f "$NETWATCH_LOG" ]]; then
+        show_msg "日志不存在，无需清空。" "warning"
+        return 0
+    fi
+    echo ""
+    read -r -p "确认清空日志 $NETWATCH_LOG? (y/N): " input
+    if [[ ! "$input" =~ ^[Yy]$ ]]; then
+        show_msg "已取消。" "warning"
+        return 1
+    fi
+    : > "$NETWATCH_LOG" && show_msg "日志已清空。" "success"
+}
+
+# 断网自愈监控子菜单
+netwatch_menu() {
+    while true; do
+        res=$($DIALOG --title "断网自愈监控" --menu "网络故障自动检测与自愈" 18 70 6 \
+            1 "查看当前状态与网络探测" \
+            2 "开启/修改配置并启用检测" \
+            3 "停止并卸载监控" \
+            4 "查看历史日志" \
+            5 "清空日志" \
+            0 "返回主菜单" 3>&1 1>&2 2>&3)
+
+        [[ -z "$res" || "$res" == "0" ]] && break
+        case $res in
+            1)
+                netwatch_status
+                read -n 1 -s -r -p $'\n按任意键返回子菜单...'
+                echo
+                ;;
+            2)
+                netwatch_configure
+                read -n 1 -s -r -p $'\n按任意键返回子菜单...'
+                echo
+                ;;
+            3)
+                netwatch_uninstall
+                read -n 1 -s -r -p $'\n按任意键返回子菜单...'
+                echo
+                ;;
+            4)
+                netwatch_view_log
+                read -n 1 -s -r -p $'\n按任意键返回子菜单...'
+                echo
+                ;;
+            5)
+                netwatch_clear_log
                 read -n 1 -s -r -p $'\n按任意键返回子菜单...'
                 echo
                 ;;
