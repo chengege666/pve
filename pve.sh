@@ -373,7 +373,9 @@ configure_cpu_governor() {
     
     IFS=' ' read -ra gov_list <<< "$available"
     local menu_items=()
+    local idx=0
     for gov in "${gov_list[@]}"; do
+        idx=$((idx + 1))
         case $gov in
             "performance")  display="高性能 (始终最高频率)" ;;
             "powersave")    display="节能模式 (始终最低频率)" ;;
@@ -384,11 +386,19 @@ configure_cpu_governor() {
             *)              display="$gov" ;;
         esac
         [[ "$gov" == "$CPU_GOVERNOR" ]] && display="$display [当前使用]"
-        menu_items+=("$gov" "$display")
+        menu_items+=("$idx" "$display ($gov)")
     done
     
     selected=$($DIALOG --title "选择 CPU 调速器" --menu "请选择工作模式：" 20 80 10 "${menu_items[@]}" 3>&1 1>&2 2>&3)
     [[ -z "$selected" ]] && return
+
+    # 编号映射回调速器名称
+    if [[ "$selected" =~ ^[0-9]+$ ]] && (( selected >= 1 && selected <= ${#gov_list[@]} )); then
+        selected="${gov_list[$((selected - 1))]}"
+    else
+        show_msg "无效选择" "error"
+        return
+    fi
 
     # 持久化备份
     backup_file "/etc/default/cpufrequtils" "CPU 调速器配置"
@@ -441,14 +451,16 @@ configure_intel_features() {
     cur_tb="未知"; [[ -f "$tb_file" ]] && { [[ "$(cat $tb_file)" == "0" ]] && cur_tb="开启" || cur_tb="关闭"; }
 
     opt=$($DIALOG --title "Intel 深度设置" --menu "当前 P-State: $(cat $ps_status)\n当前睿频: $cur_tb" 15 60 5 \
-        "active" "Active (由 P-State 驱动全面接管调频)" \
-        "passive" "Passive (由通用驱动接管，更省电)" \
-        "off" "Off (禁用 Intel 驱动模式)" \
-        "turbo" "切换 睿频加速 (Turbo Boost) 开/关" 3>&1 1>&2 2>&3)
+        1 "Active (由 P-State 驱动全面接管调频)" \
+        2 "Passive (由通用驱动接管，更省电)" \
+        3 "Off (禁用 Intel 驱动模式)" \
+        4 "切换 睿频加速 (Turbo Boost) 开/关" 3>&1 1>&2 2>&3)
 
     case $opt in
-        "active"|"passive"|"off") echo "$opt" > "$ps_status" && show_msg "P-State 已设为 $opt" "success" ;;
-        "turbo")
+        1) echo "active"  > "$ps_status" && show_msg "P-State 已设为 active" "success" ;;
+        2) echo "passive" > "$ps_status" && show_msg "P-State 已设为 passive" "success" ;;
+        3) echo "off"     > "$ps_status" && show_msg "P-State 已设为 off" "success" ;;
+        4)
             [[ "$(cat $tb_file)" == "0" ]] && echo "1" > "$tb_file" || echo "0" > "$tb_file"
             show_msg "睿频状态已切换" "success"
             ;;
