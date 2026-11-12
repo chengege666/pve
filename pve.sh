@@ -473,8 +473,8 @@ cpu_optimization_menu() {
             2 "手动设置最小/最大频率" \
             3 "Intel CPU 深度控制 (P-State/睿频)" \
             4 "一键虚拟机 CPU 优化 (设置为 host)" \
-            5 "返回主菜单" 3>&1 1>&2 2>&3)
-        [[ -z "$sel" || "$sel" == "5" ]] && break
+            0 "返回主菜单" 3>&1 1>&2 2>&3)
+        [[ -z "$sel" || "$sel" == "0" ]] && break
         case $sel in
             1) configure_cpu_governor ;;
             2) configure_cpu_frequency ;;
@@ -525,20 +525,20 @@ remove_subscription_notice() {
 # --- 3. 找回详细电源模式选择 ---
 power_optimization_menu() {
     mode=$($DIALOG --title "电源方案预设" --menu "请选择工作场景：" 15 60 4 \
-        "server" "高性能模式 (性能优先，忽略功耗)" \
-        "home" "家用平衡模式 (按需分配，静音平衡)" \
-        "save" "极致节能模式 (限制低功耗，降低发热)" 3>&1 1>&2 2>&3)
+        1 "高性能模式 (性能优先，忽略功耗)" \
+        2 "家用平衡模式 (按需分配，静音平衡)" \
+        3 "极致节能模式 (限制低功耗，降低发热)" 3>&1 1>&2 2>&3)
     
     case $mode in
-        "server")
+        1)
             for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "performance" > "$cpu" 2>/dev/null; done
             show_msg "已应用高性能预设" "success"
             ;;
-        "home")
+        2)
             for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "schedutil" > "$cpu" 2>/dev/null || echo "ondemand" > "$cpu" 2>/dev/null; done
             show_msg "已应用家用平衡预设" "success"
             ;;
-        "save")
+        3)
             for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "powersave" > "$cpu" 2>/dev/null; done
             echo "powersupersave" > /sys/module/pcie_aspm/parameters/policy 2>/dev/null
             show_msg "已应用极致节能预设" "success"
