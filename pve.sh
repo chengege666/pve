@@ -14,7 +14,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # 全局变量
-BACKUP_DIR="/root/pve_backup_$(date +%Y%m%d_%H%M%S)"
+BACKUP_ROOT="/root/pve_backup"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%Y%m%d_%H%M%S)"
 ROLLBACK_FILE="$BACKUP_DIR/rollback.log"
 CURRENT_PVE_VERSION=$(pveversion 2>/dev/null | grep -oP 'pve-manager/\K\d+\.\d+' || echo "未知")
 DIALOG="tui"
@@ -79,7 +80,7 @@ tui_menu() {
         printf "请输入编号/代码（直接回车返回）: "
         if ! read -r choice; then
             echo ""
-            return 1
+            return 2
         fi
         choice="${choice//[[:space:]]/}"
         [[ -z "$choice" ]] && return 1
@@ -129,7 +130,7 @@ tui_checklist() {
         done
         echo ""
         echo "输入编号切换勾选状态（可一次输入多个，用空格分隔）"
-        printf "输入 d 或直接回车完成，输入 q 取消: "
+        printf "回车=完成勾选, d=完成, q=取消: "
         if ! read -r input; then
             echo ""
             return 1
@@ -191,36 +192,37 @@ tui_radiolist() {
         [[ "${states[$i]}" == "ON" ]] && current=$i
     done
 
-    tui_header "$title" "$text"
-    for ((i = 0; i < ${#tags[@]}; i++)); do
-        if [[ $i -eq $current ]]; then
-            printf "  (*) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
-        else
-            printf "  ( ) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
-        fi
-    done
-    echo ""
-    printf "请输入编号选择（直接回车保留当前，q 取消）: "
-    if ! read -r choice; then
+    while true; do
+        tui_header "$title" "$text"
+        for ((i = 0; i < ${#tags[@]}; i++)); do
+            if [[ $i -eq $current ]]; then
+                printf "  (*) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+            else
+                printf "  ( ) %-3s %s\n" "${tags[$i]}" "${descs[$i]}"
+            fi
+        done
         echo ""
-        return 1
-    fi
-    choice="${choice//[[:space:]]/}"
-    [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
-    [[ -z "$choice" ]] && { echo "${tags[$current]}" >&2; return 0; }
+        printf "请输入编号选择（直接回车保留当前，q 取消）: "
+        if ! read -r choice; then
+            echo ""
+            return 1
+        fi
+        choice="${choice//[[:space:]]/}"
+        [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
+        [[ -z "$choice" ]] && { echo "${tags[$current]}" >&2; return 0; }
 
-    for ((i = 0; i < ${#tags[@]}; i++)); do
-        if [[ "$choice" == "${tags[$i]}" ]]; then
-            echo "$choice" >&2
+        for ((i = 0; i < ${#tags[@]}; i++)); do
+            if [[ "$choice" == "${tags[$i]}" ]]; then
+                echo "$choice" >&2
+                return 0
+            fi
+        done
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#tags[@]} )); then
+            echo "${tags[$((choice - 1))]}" >&2
             return 0
         fi
+        echo "无效选择，请重新输入。"
     done
-    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#tags[@]} )); then
-        echo "${tags[$((choice - 1))]}" >&2
-        return 0
-    fi
-    echo "无效选择。" >&2
-    return 1
 }
 
 # 输入框
@@ -231,15 +233,16 @@ tui_inputbox() {
 
     tui_header "$title" "$text"
     if [[ -n "$default" ]]; then
-        printf "请输入（直接回车使用默认值 %s）: " "$default"
+        printf "请输入（直接回车使用默认值 %s，输入 q 取消）: " "$default"
     else
-        printf "请输入: "
+        printf "请输入（输入 q 取消）: "
     fi
     local value
     if ! read -r value; then
         echo ""
         return 1
     fi
+    [[ "$value" == "q" || "$value" == "Q" ]] && { echo ""; return 1; }
     [[ -z "$value" ]] && value="$default"
     echo "$value" >&2
     return 0
@@ -260,16 +263,25 @@ tui_msgbox() {
 tui_yesno() {
     local title="$1"
     local text="$2"
+    local defaultno="${3:-0}"
     tui_header "$title" "$text"
     local answer
     while true; do
-        printf "请确认 (Y/n): "
+        if [[ "$defaultno" -eq 1 ]]; then
+            printf "请确认 (y/N): "
+        else
+            printf "请确认 (Y/n): "
+        fi
         if ! read -r answer; then
             echo ""
             return 1
         fi
         case "$answer" in
-            ""|[Yy]*) return 0 ;;
+            "")
+                [[ "$defaultno" -eq 1 ]] && return 1
+                return 0
+                ;;
+            [Yy]*) return 0 ;;
             [Nn]*) return 1 ;;
             *) echo "请输入 Y 或 n。" ;;
         esac
@@ -280,11 +292,16 @@ tui_yesno() {
 tui() {
     local title=""
     local kind=""
+    local defaultno=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --title)
                 title="${2:-}"
                 shift 2
+                ;;
+            --defaultno)
+                defaultno=1
+                shift
                 ;;
             --menu|--checklist|--radiolist|--inputbox|--msgbox|--yesno)
                 kind="${1#--}"
@@ -306,7 +323,7 @@ tui() {
         radiolist) tui_radiolist "$title" "$text" "$@" ;;
         inputbox) tui_inputbox "$title" "$text" "$@" ;;
         msgbox) tui_msgbox "$title" "$text" ;;
-        yesno) tui_yesno "$title" "$text" ;;
+        yesno) tui_yesno "$title" "$text" "$defaultno" ;;
         *) echo "不支持的交互类型: $kind" >&2; return 1 ;;
     esac
 }
@@ -324,8 +341,9 @@ backup_file() {
     local desc="$2"
     if [[ -f "$file" ]]; then
         mkdir -p "$BACKUP_DIR"
-        cp "$file" "$BACKUP_DIR/$(basename "$file").$(date +%s).bak"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $desc: $file" >> "$ROLLBACK_FILE"
+        local bak="$BACKUP_DIR/$(basename "$file").$(date +%s).bak"
+        cp "$file" "$bak"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $desc: $file => $bak" >> "$ROLLBACK_FILE"
     fi
 }
 
@@ -387,10 +405,23 @@ configure_cpu_frequency() {
     local min_limit=$(( $(cat $min_f_file) / 1000 ))
     local max_limit=$(( $(cat $max_f_file) / 1000 ))
 
-    new_min=$($DIALOG --title "设置最小频率" --inputbox "输入最小频率 (MHz)\n范围: $min_limit - $max_limit" 10 50 "$min_limit" 3>&1 1>&2 2>&3)
-    [[ -z "$new_min" ]] && return
-    new_max=$($DIALOG --title "设置最大频率" --inputbox "输入最大频率 (MHz)\n范围: $new_min - $max_limit" 10 50 "$max_limit" 3>&1 1>&2 2>&3)
-    [[ -z "$new_max" ]] && return
+    while true; do
+        new_min=$($DIALOG --title "设置最小频率" --inputbox "输入最小频率 (MHz)\n范围: $min_limit - $max_limit" 10 50 "$min_limit" 3>&1 1>&2 2>&3)
+        [[ -z "$new_min" ]] && return
+        if [[ "$new_min" =~ ^[0-9]+$ ]] && (( new_min >= min_limit && new_min <= max_limit )); then
+            break
+        fi
+        show_msg "最小频率必须为 $min_limit - $max_limit 之间的整数" "error"
+    done
+
+    while true; do
+        new_max=$($DIALOG --title "设置最大频率" --inputbox "输入最大频率 (MHz)\n范围: $new_min - $max_limit" 10 50 "$max_limit" 3>&1 1>&2 2>&3)
+        [[ -z "$new_max" ]] && return
+        if [[ "$new_max" =~ ^[0-9]+$ ]] && (( new_max >= new_min && new_max <= max_limit )); then
+            break
+        fi
+        show_msg "最大频率必须为 $new_min - $max_limit 之间的整数" "error"
+    done
 
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_min_freq; do echo "$((new_min * 1000))" > "$cpu" 2>/dev/null; done
     for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "$((new_max * 1000))" > "$cpu" 2>/dev/null; done
@@ -476,9 +507,9 @@ remove_subscription_notice() {
         [[ ! -f "$js_file" ]] && continue
         found=1
         backup_file "$js_file" "订阅广告修改"
-        # 用 perl -0pe 跨行匹配，将 Ext.Msg.show({ title: gettext('No valid sub...) 改为 void({ // 原内容
-        # 兼容未压缩（有空格）和 minified（无空格）两种写法
-        perl -i -0pe 's/(Ext\.Msg\.show\(\{\s*title:\s*gettext\(["\x27])No valid sub/void({\/\/\1No valid sub/g' "$js_file"
+        # 用 perl -0pe 跨行匹配，将 Ext.Msg.show({ title: gettext('No valid sub...) 改为 void({ 原内容
+        # 兼容未压缩（有空格）和 minified（无空格）两种写法；不使用 // 注释，避免压缩单行文件后续代码被注释掉
+        perl -i -0pe 's/(Ext\.Msg\.show\(\{\s*title:\s*gettext\(["\x27])No valid sub/void({\1No valid sub/g' "$js_file"
     done
 
     if [[ $found -eq 0 ]]; then
@@ -528,19 +559,59 @@ show_system_status() {
 
 # --- 6. 找回一键回滚功能 ---
 rollback_all() {
-    if [[ ! -d "$BACKUP_DIR" ]]; then
-        $DIALOG --title "错误" --msgbox "未找到本次执行的备份目录。" 10 40; return
+    # 优先使用本次会话的备份记录；若本次无备份，则取最近一次含备份记录的历史日志
+    local log="$ROLLBACK_FILE"
+    if [[ ! -f "$log" ]] || ! grep -q ' => ' "$log" 2>/dev/null; then
+        log=$(grep -l ' => ' "$BACKUP_ROOT"/*/rollback.log 2>/dev/null | sort | tail -n 1)
     fi
-    $DIALOG --title "确认回滚" --yesno "确定要撤销脚本对文件的所有修改吗？" 10 50
+    if [[ -z "$log" || ! -f "$log" ]]; then
+        $DIALOG --title "错误" --msgbox "未找到可用的备份记录。" 10 40; return
+    fi
+
+    $DIALOG --title "确认回滚" --defaultno --yesno "将按备份记录恢复文件:\n\n$log\n\n确定要撤销脚本对文件的所有修改吗？" 14 70
     [[ $? -ne 0 ]] && return
-    
-    # 回滚 JS
-    local js_bak=$(ls $BACKUP_DIR/proxmoxlib.js*.bak 2>/dev/null | tail -n 1)
-    [[ -f "$js_bak" ]] && { cp "$js_bak" "/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js" 2>/dev/null || cp "$js_bak" "/usr/share/pve-manager/js/proxmoxlib.js"; }
-    
+
+    # 按 rollback.log 逐项恢复；同一文件只恢复第一次备份，即脚本修改前的原始内容
+    local line src bak restored=0 failed=0
+    local -A first_bak=()
+    while IFS= read -r line; do
+        [[ "$line" != *" => "* ]] && continue
+        src="${line#*: }"
+        src="${src%% => *}"
+        bak="${line##* => }"
+        [[ -f "$bak" ]] || continue
+        [[ -n "${first_bak[$src]:-}" ]] && continue
+        first_bak[$src]="$bak"
+    done < "$log"
+
+    for src in "${!first_bak[@]}"; do
+        bak="${first_bak[$src]}"
+        if [[ -f "${src}.disabled" ]]; then
+            # 更换软件源时曾把 .sources 重命名为 .disabled，回滚改为改名还原，避免出现重复源
+            rm -f "$src"
+            if mv "${src}.disabled" "$src" 2>/dev/null; then
+                show_msg "已恢复: $src" "success"
+                restored=$((restored + 1))
+            else
+                show_msg "恢复失败: $src" "error"
+                failed=$((failed + 1))
+            fi
+        elif cp "$bak" "$src" 2>/dev/null; then
+            show_msg "已恢复: $src" "success"
+            restored=$((restored + 1))
+        else
+            show_msg "恢复失败: $src" "error"
+            failed=$((failed + 1))
+        fi
+    done
+
     # 重启服务
     systemctl restart pveproxy
-    show_msg "回滚完成，部分设置可能需要重启生效" "success"
+    if [[ $restored -gt 0 ]]; then
+        show_msg "回滚完成: 成功 $restored 个, 失败 $failed 个, 部分设置可能需要重启生效" "success"
+    else
+        show_msg "没有找到可恢复的备份文件" "warning"
+    fi
 }
 
 # --- 主入口逻辑 ---
@@ -560,8 +631,17 @@ main_menu() {
             10 "概要信息增强 (CPU温度/频率/硬盘/UPS)" \
             11 "断网自愈监控 (网络故障自动恢复)" \
             0 "退出脚本" 3>&1 1>&2 2>&3)
+        local rc=$?
 
-        [[ -z "$res" || "$res" == "0" ]] && break
+        # 直接回车不再静默退出，需二次确认；显式选择 0 才直接退出
+        if [[ -z "$res" ]]; then
+            # rc=2 表示输入流结束（EOF/Ctrl+D），直接退出，避免菜单无限循环
+            [[ "$rc" -eq 2 ]] && break
+            $DIALOG --title "退出确认" --defaultno --yesno "未选择功能，确定要退出脚本吗？" 10 50
+            [[ $? -eq 0 ]] && break
+            continue
+        fi
+        [[ "$res" == "0" ]] && break
         case $res in
             1) cpu_optimization_menu ;;
             2) remove_subscription_notice ;;
@@ -623,7 +703,7 @@ system_update() {
     fi
 
     # 询问是否清理无用依赖
-    $DIALOG --title "清理依赖" --yesno "是否清理不再需要的依赖包？" 10 50
+    $DIALOG --title "清理依赖" --defaultno --yesno "是否清理不再需要的依赖包？" 10 50
     if [[ $? -eq 0 ]]; then
         show_msg "正在清理无用依赖..." "info"
         apt-get autoremove -y
@@ -654,6 +734,28 @@ change_apt_source() {
         "4" "华为云 Huaweicloud" \
         "5" "恢复官方默认源" 3>&1 1>&2 2>&3)
     [[ -z "$sel" ]] && return
+
+    if [[ "$sel" == "5" ]]; then
+        # 恢复官方默认源：优先还原最近备份，再恢复被禁用的源文件并移除脚本写入的无订阅源
+        local f bak
+        for f in "$src_list" "$ent_list"; do
+            bak=$(ls -1 "$BACKUP_ROOT"/*/"$(basename "$f")".*.bak 2>/dev/null | sort | tail -n 1)
+            if [[ -n "$bak" && -f "$bak" ]] && cp "$bak" "$f" 2>/dev/null; then
+                show_msg "已还原: $f" "success"
+            fi
+        done
+        rm -f "$nosub_list"
+        for f in /etc/apt/sources.list.d/*.sources.disabled; do
+            [[ -f "$f" ]] && mv "$f" "${f%.disabled}"
+        done
+        show_msg "软件源已恢复为官方默认源，正在刷新软件包列表..." "info"
+        if apt-get update; then
+            show_msg "软件源恢复并刷新成功" "success"
+        else
+            show_msg "软件源已恢复，但刷新失败，请检查网络" "warning"
+        fi
+        return
+    fi
 
     local base_url=""
     case $sel in
@@ -787,12 +889,12 @@ process_line() {
 install_software() {
     local tool="$1"
     local soft="$2"
-    if [ -z $(which ${tool}) ]; then
+    if ! command -v "${tool}" > /dev/null 2>&1; then
         ${updateReleaseInfoChange} > /dev/null 2>&1
         echoContent green " ---> 安装 ${soft}"
         process_line '进度'
         ${installType} ${soft} > /dev/null 2>&1
-        if [ -z $(which ${tool}) ]; then
+        if ! command -v "${tool}" > /dev/null 2>&1; then
             echoContent red " ---> ${soft} 安装失败, 请检查 PVE 软件源及网络的连通性、DNS有效性后重试"
         else
             echoContent green " ---> ${soft} 安装完成"
@@ -803,11 +905,11 @@ install_software() {
 remove_software() {
     local tool="$1"
     local soft="$2"
-    if [ ! -z $(which ${tool}) ]; then
+    if command -v "${tool}" > /dev/null 2>&1; then
         echoContent green " ---> 卸载 ${soft}"
         process_line '进度'
         ${removeType} ${soft} > /dev/null 2>&1
-        if [ -n $(which ${tool}) ]; then
+        if command -v "${tool}" > /dev/null 2>&1; then
             echoContent red " ---> ${soft} 卸载失败"
         else
             echoContent green " ---> ${soft} 卸载完成"
@@ -887,7 +989,7 @@ pve_Info_Menu() {
             x "一键清空（全部不选）" \
             s "跳过本次修改" 3>&1 1>&2 2>&3)
 
-        [[ -z "$preset" ]] && return   # 用户取消，保持 choices 空
+        [[ -z "$preset" ]] && return 1   # 用户取消，不做任何修改
         [[ "$preset" == "s" ]] && { choices[s]="*"; return; }
 
         # 清空明细项
@@ -974,7 +1076,7 @@ pve_Info_Menu() {
         done
         [[ -z "$summary" ]] && summary="（无勾选项）"
 
-        $DIALOG --title "概要信息定制 - 确认" --yesno \
+        $DIALOG --title "概要信息定制 - 确认" --defaultno --yesno \
             "当前将应用以下配置（勾选代码）：\n\n  ${summary}\n\n是否确认并继续？" 14 80
         if [[ $? -eq 0 ]]; then
             return
@@ -984,6 +1086,12 @@ pve_Info_Menu() {
 
 pve_Info_mod() {
 	pve_Info_Menu
+    # 用户在定制向导中取消（直接回车返回）时不修改任何文件
+    if [[ $? -ne 0 ]]; then
+        show_msg "已取消，未做任何修改" "warning"
+        return
+    fi
+
     cpu_freqs_api=''
     thread_freqs_api=''
     cpu_modes_api=''
@@ -1217,7 +1325,7 @@ pve_Info_mod() {
         if [[ "${choices[4]}" == "*" ]]; then
             install_software 'turbostat' 'linux-cpupower'
 
-            if [ -n $(which turbostat) ]; then
+            if command -v turbostat > /dev/null 2>&1; then
                 chmod +s /usr/sbin/turbostat
             fi
 
@@ -1266,7 +1374,7 @@ pve_Info_mod() {
 	                output = output.slice(0, -2);
 	            }'
 
-        cpu_info_degree="$[cpu_freqs_degree + (thread_freqs_degree+4-1)/4]"
+        cpu_info_degree="$[${cpu_freqs_degree:-0} + (${thread_freqs_degree:-0}+4-1)/4]"
 
         cpu_info_height="$[cpu_info_degree*row_height+7]"
 
@@ -1576,7 +1684,7 @@ pve_Info_mod() {
     if [[ "${choices[9]}" ]]; then
         install_software 'apcaccess' 'apcupsd'
 
-        if [ -n $(which apcaccess) ]; then
+        if command -v apcaccess > /dev/null 2>&1; then
             chmod +s /usr/sbin/apcaccess
         fi
 
@@ -1584,7 +1692,7 @@ pve_Info_mod() {
 	$res->{ups_apcaccess} = `apcaccess|grep -E "STARTTIME|MODEL|STATUS|LINEV|BATTDATE|BCHARGE|LOADPCT|TIMELEFT|NUMXFERS|MBATTCHG|SENSE|BATTV|NOMPOWER"`;
 '
 
-        if [ ! $(apcaccess|grep -E "NOMPOWER" | awk '{print $3}') ]; then
+        if [[ -z "$(apcaccess 2>/dev/null | grep -E 'NOMPOWER' | awk '{print $3}')" ]]; then
             while :
             do
                 read -r -p "请输入 UPS 的额定功率 (输入正整数, 单位: W; 输入 skip 跳过): " selectUPSNorPower
@@ -1596,7 +1704,7 @@ pve_Info_mod() {
                         break
                         ;;
                     *)
-                        if [[ "${selectUPSNorPower}" -gt '0' ]]; then
+                        if [[ "${selectUPSNorPower}" =~ ^[1-9][0-9]*$ ]]; then
                             UPSNorPower="${selectUPSNorPower}"
                             echoContent green " ---> UPS 的额定功率：${UPSNorPower}W"
                             break
@@ -1835,7 +1943,7 @@ pve_Info_mod() {
 
     if [[ "${choices[a]}" == "*" || "${choices[b]}" == "*" || "${choices[c]}" == "*" ]]; then
         if [[ "${choices[a]}" == "*" || "${choices[b]}" == "*" ]]; then
-            if [ -n $(which smartctl) ]; then
+            if command -v smartctl > /dev/null 2>&1; then
                 chmod +s /usr/sbin/smartctl
             fi
         fi
@@ -2410,8 +2518,9 @@ pve_Info_mod() {
                     storage_info_api="$storage_info_api$storage_info_api_tmp"
 
                     storage_name="其他存储"
+                    storage_degree="1"
 
-                    if [[ ! -z $(smartctl -a "$storage_device" | grep -E "Model|^Vendor|^Product") ]]; then
+                    if [[ -n "$(smartctl -a "$storage_device" 2>/dev/null | grep -E 'Model|^Vendor|^Product')" ]]; then
                         storage_name="硬盘"
                         if [[ "${choices[b]}" == "*" && "${choices[c]}" == "*" ]]; then
                             storage_degree="3"
@@ -2525,6 +2634,8 @@ pve_Info_mod() {
         if [ $height2 -le 325 ]; then
             height2="300"
         fi
+        backup_file "/usr/share/perl5/PVE/API2/Nodes.pm" "概要信息 Perl API"
+        backup_file "/usr/share/pve-manager/js/pvemanagerlib.js" "概要信息 前端"
         sed -i '/PVE::pvecfg::version_text();/,/my $dinfo = df/!b;//!d;/my $dinfo = df/e cat /tmp/2.txt' /usr/share/perl5/PVE/API2/Nodes.pm
         sed -i '/pveversion/,/^\s\+],/!b;//!d;/^\s\+],/e cat /tmp/3.txt' /usr/share/pve-manager/js/pvemanagerlib.js
     
@@ -2750,7 +2861,7 @@ netwatch_configure() {
     echo "        开机保护期内 (uptime 小于设定秒数) 绝不触发，防止死循环。"
     echo ""
 
-    local input def_gw
+    local input def_gw o1 o2 o3 o4
 
     # 自动探测默认网关作为目标 1 默认值
     def_gw=$(ip route 2>/dev/null | awk '/^default/ {print $3; exit}')
@@ -2766,7 +2877,10 @@ netwatch_configure() {
         read -r -p "目标 IP 1 (网关) [$NW_TARGET1]: " input
         [[ -z "$input" ]] && input="$NW_TARGET1"
         if [[ "$input" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            NW_TARGET1="$input"; break
+            IFS=. read -r o1 o2 o3 o4 <<< "$input"
+            if (( 10#$o1 <= 255 && 10#$o2 <= 255 && 10#$o3 <= 255 && 10#$o4 <= 255 )); then
+                NW_TARGET1="$input"; break
+            fi
         fi
         show_msg "IP 格式不正确，请重新输入。" "error"
     done
@@ -2776,19 +2890,22 @@ netwatch_configure() {
         read -r -p "目标 IP 2 (公网 DNS) [$NW_TARGET2]: " input
         [[ -z "$input" ]] && input="$NW_TARGET2"
         if [[ "$input" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            NW_TARGET2="$input"; break
+            IFS=. read -r o1 o2 o3 o4 <<< "$input"
+            if (( 10#$o1 <= 255 && 10#$o2 <= 255 && 10#$o3 <= 255 && 10#$o4 <= 255 )); then
+                NW_TARGET2="$input"; break
+            fi
         fi
         show_msg "IP 格式不正确，请重新输入。" "error"
     done
 
     # 检测频率
     while true; do
-        read -r -p "检测频率 (分钟, 正整数) [$NW_INTERVAL_MIN]: " input
+        read -r -p "检测频率 (1-59 分钟, 正整数) [$NW_INTERVAL_MIN]: " input
         [[ -z "$input" ]] && input="$NW_INTERVAL_MIN"
-        if [[ "$input" =~ ^[1-9][0-9]*$ ]]; then
+        if [[ "$input" =~ ^[1-9][0-9]*$ ]] && (( input <= 59 )); then
             NW_INTERVAL_MIN="$input"; break
         fi
-        show_msg "请输入正整数。" "error"
+        show_msg "请输入 1-59 之间的整数。" "error"
     done
 
     # 开机保护期
@@ -2877,16 +2994,17 @@ case "${NW_ACTION:-1}" in
     *) act="整机重启 (reboot)" ;;
 esac
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [告警] 双目标失联: $NW_TARGET1 / $NW_TARGET2, 已触发自愈: $act" >> "$NETWATCH_LOG"
+
+# 日志裁剪: 仅保留最近 500 行，防止无限膨胀（必须在重启前执行，否则重启分支永远执行不到）
+if [[ -f "$NETWATCH_LOG" ]] && [[ $(wc -l < "$NETWATCH_LOG") -gt 500 ]]; then
+    tail -n 500 "$NETWATCH_LOG" > "${NETWATCH_LOG}.tmp" && mv "${NETWATCH_LOG}.tmp" "$NETWATCH_LOG"
+fi
+
 sync
 case "${NW_ACTION:-1}" in
     2) systemctl restart networking ;;
     *) /sbin/reboot ;;
 esac
-
-# 日志裁剪: 仅保留最近 500 行，防止无限膨胀
-if [[ -f "$NETWATCH_LOG" ]] && [[ $(wc -l < "$NETWATCH_LOG") -gt 500 ]]; then
-    tail -n 500 "$NETWATCH_LOG" > "${NETWATCH_LOG}.tmp" && mv "${NETWATCH_LOG}.tmp" "$NETWATCH_LOG"
-fi
 exit 0
 NW_EOF
     chmod 755 "$NETWATCH_BIN"
