@@ -77,13 +77,13 @@ tui_menu() {
             printf "  %-6s %s\n" "${tags[$i]}" "${descs[$i]}"
         done
         echo ""
-        printf "请输入编号/代码（直接回车返回）: "
+        printf "请输入编号/代码（0 返回）: "
         if ! read -r choice; then
             echo ""
             return 2
         fi
         choice="${choice//[[:space:]]/}"
-        [[ -z "$choice" ]] && return 1
+        [[ -z "$choice" ]] && { echo "未输入内容，请重新输入。"; continue; }
 
         # 优先匹配原始 tag，其次按显示序号
         for ((i = 0; i < ${#tags[@]}; i++)); do
@@ -92,6 +92,7 @@ tui_menu() {
                 return 0
             fi
         done
+        [[ "$choice" == "0" ]] && return 1
         if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#tags[@]} )); then
             echo "${tags[$((choice - 1))]}" >&2
             return 0
@@ -130,7 +131,7 @@ tui_checklist() {
         done
         echo ""
         echo "输入编号切换勾选状态（可一次输入多个，用空格分隔）"
-        printf "回车=完成勾选, d=完成, q=取消: "
+        printf "回车=完成勾选, d=完成, 0=返回: "
         if ! read -r input; then
             echo ""
             return 1
@@ -145,7 +146,7 @@ tui_checklist() {
                 echo "$selected" >&2
                 return 0
                 ;;
-            q|Q)
+            0)
                 return 1
                 ;;
         esac
@@ -202,13 +203,13 @@ tui_radiolist() {
             fi
         done
         echo ""
-        printf "请输入编号选择（直接回车保留当前，q 取消）: "
+        printf "请输入编号选择（直接回车保留当前，0 返回）: "
         if ! read -r choice; then
             echo ""
             return 1
         fi
         choice="${choice//[[:space:]]/}"
-        [[ "$choice" == "q" || "$choice" == "Q" ]] && return 1
+        [[ "$choice" == "0" ]] && return 1
         [[ -z "$choice" ]] && { echo "${tags[$current]}" >&2; return 0; }
 
         for ((i = 0; i < ${#tags[@]}; i++)); do
@@ -233,16 +234,16 @@ tui_inputbox() {
 
     tui_header "$title" "$text"
     if [[ -n "$default" ]]; then
-        printf "请输入（直接回车使用默认值 %s，输入 q 取消）: " "$default"
+        printf "请输入（直接回车使用默认值 %s，输入 0 返回）: " "$default"
     else
-        printf "请输入（输入 q 取消）: "
+        printf "请输入（输入 0 返回）: "
     fi
     local value
     if ! read -r value; then
         echo ""
         return 1
     fi
-    [[ "$value" == "q" || "$value" == "Q" ]] && { echo ""; return 1; }
+    [[ "$value" == "0" ]] && { echo ""; return 1; }
     [[ -z "$value" ]] && value="$default"
     echo "$value" >&2
     return 0
@@ -633,14 +634,8 @@ main_menu() {
             0 "退出脚本" 3>&1 1>&2 2>&3)
         local rc=$?
 
-        # 直接回车不再静默退出，需二次确认；显式选择 0 才直接退出
-        if [[ -z "$res" ]]; then
-            # rc=2 表示输入流结束（EOF/Ctrl+D），直接退出，避免菜单无限循环
-            [[ "$rc" -eq 2 ]] && break
-            $DIALOG --title "退出确认" --defaultno --yesno "未选择功能，确定要退出脚本吗？" 10 50
-            [[ $? -eq 0 ]] && break
-            continue
-        fi
+        # EOF/Ctrl+D 直接退出，避免菜单无限循环；回车不再返回，统一输入 0
+        [[ "$rc" -eq 2 ]] && break
         [[ "$res" == "0" ]] && break
         case $res in
             1) cpu_optimization_menu ;;
@@ -1086,7 +1081,7 @@ pve_Info_Menu() {
 
 pve_Info_mod() {
 	pve_Info_Menu
-    # 用户在定制向导中取消（直接回车返回）时不修改任何文件
+    # 用户在定制向导中取消（输入 0 返回）时不修改任何文件
     if [[ $? -ne 0 ]]; then
         show_msg "已取消，未做任何修改" "warning"
         return
